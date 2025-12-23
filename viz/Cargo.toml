@@ -1,0 +1,9 @@
+[package]
+edition = "2021"
+name = "viz"
+version = "0.1.0"
+
+[dependencies]
+burn = {version = "0.19", features = ["tch"]}
+macroquad = "0.4"
+shared = {path = "../shared"}

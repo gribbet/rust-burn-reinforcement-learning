@@ -1,0 +1,7 @@
+[workspace]
+members = [
+  "shared",
+  "train",
+  "viz",
+]
+resolver = "2"

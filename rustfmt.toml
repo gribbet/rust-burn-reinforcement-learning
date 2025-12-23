@@ -1,0 +1,2 @@
+# Use "Max" to encourage more single-line formatting across the board
+use_small_heuristics = "Max"
