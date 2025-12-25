@@ -9,7 +9,7 @@ use burn::backend::{Autodiff, LibTorch};
 fn main() {
     let device = LibTorchDevice::Mps;
     let config = ProximalPolicyOptimizationConfig::new();
-    let iterations = 200;
+    let iterations = 5000;
 
     train::<Autodiff<LibTorch>>(device, config, iterations);
 }

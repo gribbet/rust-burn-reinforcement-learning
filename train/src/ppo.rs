@@ -26,7 +26,7 @@ pub struct ProximalPolicyOptimizationConfig {
     pub generalized_advantage_estimation_lambda: f32,
     #[config(default = 0.2)]
     pub proximal_policy_optimization_clip: f32,
-    #[config(default = 0.01)]
+    #[config(default = 0.05)]
     pub entropy_coefficient: f32,
     #[config(default = 0.5)]
     pub value_coefficient: f32,
@@ -34,7 +34,7 @@ pub struct ProximalPolicyOptimizationConfig {
     pub learning_rate: f64,
     #[config(default = 4)]
     pub update_epochs: usize,
-    #[config(default = 8)]
+    #[config(default = 32)]
     pub minibatches: usize,
     #[config(default = 0.5)]
     pub max_grad_norm: f32,
@@ -55,14 +55,27 @@ pub fn train<B: AutodiffBackend>(
         ..
     } = config;
     let mut random_number_generator = StdRng::from_entropy();
-    let environment = TrainingEnv::new();
+    let environment = TrainingEnv::default();
 
     let (mut observation, mut state) = environment.reset::<B>(environments_count, &device);
+    let mut current_episode_rewards =
+        Tensor::<B::InnerBackend, 1>::zeros([environments_count], &device);
 
     let input_dimension = observation.dims()[1];
-    let action_dimension = 1;
+    let action_dimension = 4;
 
     let mut model = ActorCritic::<B>::new(input_dimension, action_dimension, &device);
+    let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+    if std::path::Path::new("model.bin").exists() {
+        match model.clone().load_file("model", &recorder, &device) {
+            Ok(loaded_model) => {
+                model = loaded_model;
+                println!("Successfully loaded existing model from model.bin");
+            }
+            Err(e) => println!("Failed to load existing model: {:?}", e),
+        }
+    }
+
     let mut optimizer = AdamConfig::new()
         .with_grad_clipping(Some(GradientClippingConfig::Norm(max_grad_norm)))
         .init();
@@ -75,8 +88,15 @@ pub fn train<B: AutodiffBackend>(
     for i in 0..iterations {
         let iteration_start = Instant::now();
 
-        let rollout =
-            collect_rollout(&model, &environment, &mut observation, &mut state, &config, &device);
+        let rollout = collect_rollout(
+            &model,
+            &environment,
+            &mut observation,
+            &mut state,
+            &mut current_episode_rewards,
+            &config,
+            &device,
+        );
 
         let model_valid = model.clone().valid();
         let (_, _, last_values) = model_valid.forward(observation.clone().inner());
@@ -157,29 +177,31 @@ pub fn train<B: AutodiffBackend>(
         let steps_per_second = number_of_samples as f64 / duration;
 
         if i % 10 == 0 || i == iterations - 1 {
-            let num_envs = environments_count as f32;
-            let total_reward: f32 = Tensor::cat(rollout.rewards, 0).sum().into_scalar().elem();
-            let total_done: f32 = Tensor::<B::InnerBackend, 1, Int>::cat(rollout.dones, 0)
-                .float()
-                .sum()
-                .into_scalar()
-                .elem();
-            let total_success: f32 = Tensor::<B::InnerBackend, 1, Int>::cat(rollout.successes, 0)
-                .float()
-                .sum()
-                .into_scalar()
-                .elem();
+            let total_episodes = rollout.episode_rewards.len();
+            let fallen_pct = if total_episodes > 0 {
+                (rollout.fallen_episodes as f64 / total_episodes as f64) * 100.0
+            } else {
+                0.0
+            };
 
-            let avg_return = total_reward / num_envs;
-            let success_rate = if total_done > 0.0 { total_success / total_done } else { 0.0 };
+            let avg_episode_reward = if total_episodes > 0 {
+                rollout.episode_rewards.iter().sum::<f32>() / total_episodes as f32
+            } else {
+                0.0
+            };
 
             println!(
-                "Iter {:4} | Return: {:7.2} | Success: {:6.2}% | SPS: {:8.0}",
-                i,
-                avg_return,
-                success_rate * 100.0,
-                steps_per_second
+                "Iter {:4} | Reward: {:7.2} | Fallen: {:6.2}% | SPS: {:8.0}",
+                i, avg_episode_reward, fallen_pct, steps_per_second
             );
+
+            if i % 10 == 0 {
+                let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
+                model
+                    .clone()
+                    .save_file("model", &recorder)
+                    .expect("Should be able to save the model");
+            }
         }
     }
 
@@ -236,14 +258,16 @@ fn collect_rollout<B: AutodiffBackend>(
     environment: &TrainingEnv,
     observation_outer: &mut Tensor<B, 2>,
     state_outer: &mut PhysicsState<B>,
+    current_episode_rewards: &mut Tensor<B::InnerBackend, 1>,
     config: &ProximalPolicyOptimizationConfig,
     device: &B::Device,
 ) -> Rollout<B::InnerBackend> {
     let ProximalPolicyOptimizationConfig { environments_count, rollout_length, .. } = *config;
     let model_valid = model.clone().valid();
+    let action_dim = 4;
 
     let action_noise = Tensor::<B::InnerBackend, 3>::random(
-        [rollout_length, environments_count, 1],
+        [rollout_length, environments_count, action_dim],
         Distribution::Normal(0.0, 1.0),
         device,
     );
@@ -266,8 +290,35 @@ fn collect_rollout<B: AutodiffBackend>(
         let log_probability = distribution.log_probability(action.clone());
         let value = value.squeeze_dim(1);
 
-        let step = environment.step(state, action.clone().squeeze_dim::<1>(1));
-        let TrainingStep { reward, done, success, .. } = step;
+        let step = environment.step(state, action.clone());
+        let TrainingStep { reward, done, is_fallen, .. } = step;
+
+        // Update cumulative reward
+        *current_episode_rewards = current_episode_rewards.clone() + reward.clone();
+
+        // Check for done episodes and extract rewards
+        let is_done = done.clone().bool();
+        let done_cpu = done.clone().into_data();
+        let reward_cpu = current_episode_rewards.clone().into_data();
+        let is_fallen_cpu = is_fallen.clone().into_data();
+
+        let done_slice = done_cpu.as_slice::<i64>().unwrap();
+        let reward_slice = reward_cpu.as_slice::<f32>().unwrap();
+        let is_fallen_slice = is_fallen_cpu.as_slice::<i64>().unwrap();
+
+        for (idx, &d) in done_slice.iter().enumerate() {
+            if d == 1 {
+                rollout.episode_rewards.push(reward_slice[idx]);
+                if is_fallen_slice[idx] == 1 {
+                    rollout.fallen_episodes += 1;
+                }
+            }
+        }
+
+        *current_episode_rewards = current_episode_rewards
+            .clone()
+            .mask_where(is_done.clone(), Tensor::zeros_like(current_episode_rewards));
+
         rollout.push(
             observation.clone(),
             action,
@@ -275,13 +326,12 @@ fn collect_rollout<B: AutodiffBackend>(
             value,
             reward,
             done.clone(),
-            success,
+            is_fallen,
         );
 
         observation = step.observation;
         state = step.state;
 
-        let is_done = done.equal_elem(1);
         let dims = observation.dims();
         observation = observation.mask_where(
             is_done.clone().unsqueeze_dim::<2>(1).expand(dims),
@@ -303,7 +353,8 @@ struct Rollout<B: Backend> {
     values: Vec<Tensor<B, 1>>,
     rewards: Vec<Tensor<B, 1>>,
     dones: Vec<Tensor<B, 1, Int>>,
-    successes: Vec<Tensor<B, 1, Int>>,
+    fallen_episodes: usize,
+    episode_rewards: Vec<f32>,
 }
 
 impl<B: Backend> Rollout<B> {
@@ -315,7 +366,8 @@ impl<B: Backend> Rollout<B> {
             values: Vec::with_capacity(capacity),
             rewards: Vec::with_capacity(capacity),
             dones: Vec::with_capacity(capacity),
-            successes: Vec::with_capacity(capacity),
+            fallen_episodes: 0,
+            episode_rewards: Vec::new(),
         }
     }
 
@@ -327,7 +379,7 @@ impl<B: Backend> Rollout<B> {
         value: Tensor<B, 1>,
         reward: Tensor<B, 1>,
         done: Tensor<B, 1, Int>,
-        success: Tensor<B, 1, Int>,
+        _is_fallen: Tensor<B, 1, Int>,
     ) {
         self.observations.push(observation);
         self.actions.push(action);
@@ -335,7 +387,6 @@ impl<B: Backend> Rollout<B> {
         self.values.push(value);
         self.rewards.push(reward);
         self.dones.push(done);
-        self.successes.push(success);
     }
 }
 
