@@ -295,9 +295,9 @@ impl BipedalWalkerPhysics {
 
         // Hips: -0.8 to 0.8 rad (~ +/- 45 deg)
         let t_l_hip_limit =
-            limit_torque(state.left_hip_angle.clone(), state.left_hip_v.clone(), -0.8, 0.8);
+            limit_torque(state.left_hip_angle.clone(), state.left_hip_v.clone(), -0.7, 1.0);
         let t_r_hip_limit =
-            limit_torque(state.right_hip_angle.clone(), state.right_hip_v.clone(), -0.8, 0.8);
+            limit_torque(state.right_hip_angle.clone(), state.right_hip_v.clone(), -0.7, 1.0);
 
         // Knees: -2.5 to 0.0 rad (-140 to 0 deg) - Knees don't bend backwards
         let t_l_knee_limit =

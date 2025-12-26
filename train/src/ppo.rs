@@ -18,7 +18,7 @@ use std::time::Instant;
 pub struct ProximalPolicyOptimizationConfig {
     #[config(default = 1024)]
     pub environments_count: usize,
-    #[config(default = 128)]
+    #[config(default = 64)]
     pub rollout_length: usize,
     #[config(default = 0.99)]
     pub gamma: f32,
@@ -26,11 +26,11 @@ pub struct ProximalPolicyOptimizationConfig {
     pub generalized_advantage_estimation_lambda: f32,
     #[config(default = 0.2)]
     pub proximal_policy_optimization_clip: f32,
-    #[config(default = 0.05)]
+    #[config(default = 0.02)]
     pub entropy_coefficient: f32,
     #[config(default = 0.5)]
     pub value_coefficient: f32,
-    #[config(default = 1e-2)]
+    #[config(default = 3e-3)]
     pub learning_rate: f64,
     #[config(default = 4)]
     pub update_epochs: usize,
@@ -232,7 +232,7 @@ fn compute_proximal_policy_optimization_loss<B: AutodiffBackend>(
     let (mean, log_std, values) = model.forward(observation);
     let values = values.squeeze_dim::<1>(1);
 
-    let distribution = DiagonalGaussian::new(mean, log_std);
+    let distribution = DiagonalGaussian::new(mean, log_std.clamp(-5.0, 2.0));
     let log_probabilities = distribution.log_probability(actions);
     let entropy = distribution.entropy();
 

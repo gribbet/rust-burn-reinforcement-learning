@@ -111,8 +111,9 @@ impl TrainingEnv {
         let mut state = self.physics.initial_state(environments_count, device);
 
         state.target_velocity =
-            Tensor::<B, 1>::random([environments_count], Distribution::Uniform(0.0, 3.0), device)
+            (Tensor::<B, 1>::random([environments_count], Distribution::Uniform(0.0, 2.0), device)
                 .floor()
+                * 2.0)
                 - 1.0;
 
         (self.physics.get_observation(&state), state)
@@ -129,20 +130,20 @@ impl TrainingEnv {
         let next_state = self.physics.step(state.clone(), action.clone());
 
         // Done conditions
-        let is_fallen = next_state.hull_y.clone().lower_equal_elem(0.5);
+        let is_fallen = next_state.hull_y.clone().lower_equal_elem(0.8);
 
         // Reward function
         let distance = next_state.hull_x.clone() - state.hull_x.clone();
         let progress = (distance.clone() * state.target_velocity.clone()) * 100.0; // Reward based on target direction
+        let progress = progress.mask_where(is_fallen.clone(), Tensor::zeros_like(&distance));
         let still_penalty =
             distance.powf_scalar(2.0) * (1.0 - state.target_velocity.clone().abs()) * -0.5;
 
-        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim(1) * -0.2; // Efficiency penalty
+        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim(1) * -0.01; // Efficiency penalty
 
-        // Survival reward only if NOT fallen
-        let survival = Tensor::ones_like(&progress) * 1.0;
-
-        let reward = progress + torque_penalty + still_penalty + survival;
+        let survival = (Tensor::ones_like(&progress) * 1.0)
+            .mask_where(is_fallen.clone(), Tensor::ones_like(&progress) * -100.0);
+        let reward = progress + torque_penalty;
 
         let is_max_steps = next_state.time.clone().greater_equal_elem(self.max_steps);
 
