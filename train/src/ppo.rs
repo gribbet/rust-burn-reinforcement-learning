@@ -16,9 +16,9 @@ use std::time::Instant;
 
 #[derive(Config, Debug)]
 pub struct ProximalPolicyOptimizationConfig {
-    #[config(default = 1024)]
+    #[config(default = 2048)]
     pub environments_count: usize,
-    #[config(default = 64)]
+    #[config(default = 128)]
     pub rollout_length: usize,
     #[config(default = 0.99)]
     pub gamma: f32,
@@ -30,11 +30,11 @@ pub struct ProximalPolicyOptimizationConfig {
     pub entropy_coefficient: f32,
     #[config(default = 0.5)]
     pub value_coefficient: f32,
-    #[config(default = 3e-3)]
+    #[config(default = 3e-4)]
     pub learning_rate: f64,
     #[config(default = 4)]
     pub update_epochs: usize,
-    #[config(default = 32)]
+    #[config(default = 64)]
     pub minibatches: usize,
     #[config(default = 0.5)]
     pub max_grad_norm: f32,

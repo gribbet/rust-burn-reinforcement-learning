@@ -111,10 +111,7 @@ impl TrainingEnv {
         let mut state = self.physics.initial_state(environments_count, device);
 
         state.target_velocity =
-            (Tensor::<B, 1>::random([environments_count], Distribution::Uniform(0.0, 2.0), device)
-                .floor()
-                * 2.0)
-                - 1.0;
+            (Tensor::<B, 1>::random([environments_count], Distribution::Uniform(1.0, 1.0), device));
 
         (self.physics.get_observation(&state), state)
     }
@@ -139,7 +136,7 @@ impl TrainingEnv {
         let still_penalty =
             distance.powf_scalar(2.0) * (1.0 - state.target_velocity.clone().abs()) * -0.5;
 
-        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim(1) * -0.01; // Efficiency penalty
+        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim(1) * 0.0; // Efficiency penalty
 
         let survival = (Tensor::ones_like(&progress) * 1.0)
             .mask_where(is_fallen.clone(), Tensor::ones_like(&progress) * -100.0);

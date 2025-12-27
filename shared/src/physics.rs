@@ -46,7 +46,7 @@ impl Default for BipedalWalkerPhysics {
             friction: 0.3,
             torque_magnitude: 20.0, // Increased from 10.0
             joint_damping: 0.1,
-            sub_steps: 2, // Increased from
+            sub_steps: 3, // Increased from
         }
     }
 }
@@ -125,8 +125,8 @@ impl BipedalWalkerPhysics {
         let m_leg = self.leg_mass; // Lumped mass for knee/foot
 
         // Ground Contact (Penalty)
-        let k_g = 1000.0; // Significantly increased stiffness
-        let d_g = 100.0; // Increased damping
+        let k_g = 2000.0; // Significantly increased stiffness
+        let d_g = (k_g * m_hull).sqrt() * 2.0; // Critically damped
 
         let ground_force = |y: Tensor<B, 1>, vx: Tensor<B, 1>, vy: Tensor<B, 1>| {
             let penetration = y.clone().mul_scalar(-1.0).clamp_min(0.0);
@@ -277,16 +277,19 @@ impl BipedalWalkerPhysics {
         let t_r_knee_damp = state.right_knee_v.clone() * -damp_coef;
 
         // Limits
+        let k_limit = 1000.0;
+        let d_limit = (k_limit * self.leg_mass).sqrt() * 2.0;
+
         let limit_torque = |angle: Tensor<B, 1>, v: Tensor<B, 1>, min: f32, max: f32| {
             // Lower limit
             let diff_min = min - angle.clone();
             let mask_min = diff_min.clone().greater_equal_elem(0.0);
-            let t_min = diff_min.clamp_min(0.0) * 1000.0 - v.clone() * 50.0;
+            let t_min = diff_min.clamp_min(0.0) * k_limit - v.clone() * d_limit;
 
             // Upper limit
             let diff_max = angle.clone() - max;
             let mask_max = diff_max.clone().greater_equal_elem(0.0);
-            let t_max = (diff_max.clamp_min(0.0) * 1000.0 + v.clone() * 50.0) * -1.0;
+            let t_max = (diff_max.clamp_min(0.0) * k_limit + v.clone() * d_limit) * -1.0;
 
             let t =
                 Tensor::zeros_like(&angle).mask_where(mask_min, t_min).mask_where(mask_max, t_max);
@@ -415,10 +418,10 @@ impl BipedalWalkerPhysics {
         PhysicsState {
             hull_x: Tensor::zeros([batch_size], device),
             hull_y: Tensor::ones([batch_size], device) * 1.05,
-            hull_angle: random(-0.1, 0.1),
-            hull_vx: random(-0.2, 0.2),
-            hull_vy: random(-0.2, 0.2),
-            hull_v_angle: random(-0.2, 0.2),
+            hull_angle: random(-0.5, 0.5),
+            hull_vx: random(-0.5, 0.5),
+            hull_vy: random(-0.5, 0.5),
+            hull_v_angle: random(-0.5, 0.5),
             left_hip_angle: random(-0.5, 0.5),
             left_hip_v: Tensor::zeros([batch_size], device),
             left_knee_angle: random(-0.6, 0.0),

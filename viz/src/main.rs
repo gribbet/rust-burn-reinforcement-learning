@@ -40,13 +40,7 @@ async fn main() {
     loop {
         clear_background(WHITE);
 
-        let target_vel = if is_key_down(KeyCode::Right) {
-            1.0
-        } else if is_key_down(KeyCode::Left) {
-            -1.0
-        } else {
-            0.0
-        };
+        let target_vel = 1.0;
 
         state.target_velocity = Tensor::from_floats([target_vel], &device);
 
