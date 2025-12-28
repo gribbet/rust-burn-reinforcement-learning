@@ -62,7 +62,7 @@ pub fn train<B: AutodiffBackend>(
         Tensor::<B::InnerBackend, 1>::zeros([environments_count], &device);
 
     let input_dimension = observation.dims()[1];
-    let action_dimension = 4;
+    let action_dimension = environment.physics.morphology.num_joints();
 
     let mut model = ActorCritic::<B>::new(input_dimension, action_dimension, &device);
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
@@ -264,7 +264,7 @@ fn collect_rollout<B: AutodiffBackend>(
 ) -> Rollout<B::InnerBackend> {
     let ProximalPolicyOptimizationConfig { environments_count, rollout_length, .. } = *config;
     let model_valid = model.clone().valid();
-    let action_dim = 4;
+    let action_dim = environment.physics.morphology.num_joints();
 
     let action_noise = Tensor::<B::InnerBackend, 3>::random(
         [rollout_length, environments_count, action_dim],

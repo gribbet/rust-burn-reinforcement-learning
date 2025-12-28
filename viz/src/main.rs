@@ -3,11 +3,11 @@ use burn::prelude::*;
 use burn::record::{BinFileRecorder, FullPrecisionSettings};
 use macroquad::prelude::*;
 use shared::model::ActorCritic;
-use shared::physics::{BipedalWalkerPhysics, PhysicsState};
+use shared::physics::{PhysicsState, Segment, WalkerPhysics};
 
 fn window_conf() -> Conf {
     Conf {
-        window_title: "Bipedal Walker".to_owned(),
+        window_title: "Walker Visualization".to_owned(),
         sample_count: 4,
         high_dpi: true,
         ..Default::default()
@@ -17,14 +17,15 @@ fn window_conf() -> Conf {
 #[macroquad::main(window_conf)]
 async fn main() {
     let device = LibTorchDevice::Mps;
-    let physics = BipedalWalkerPhysics::default();
+    let physics = WalkerPhysics::default();
 
     // Manually initialize state to be upright and deterministic for visualization
     let mut state = physics.initial_state(1, &device);
 
     let initial_obs = physics.get_observation(&state);
     let input_dim = initial_obs.dims()[1];
-    let mut model = ActorCritic::<LibTorch>::new(input_dim, 4, &device);
+    let action_dim = physics.morphology.num_joints();
+    let mut model = ActorCritic::<LibTorch>::new(input_dim, action_dim, &device);
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
     let mut model_loaded = false;
 
@@ -49,7 +50,7 @@ async fn main() {
             let (mean, _, _) = model.forward(obs);
             mean.clamp(-1.0, 1.0)
         } else {
-            Tensor::zeros([1, 4], &device)
+            Tensor::zeros([1, action_dim], &device)
         };
 
         state = physics.step(state, action.clone());
@@ -60,10 +61,17 @@ async fn main() {
     }
 }
 
-fn draw_simulation<B: Backend>(state: &PhysicsState<B>, physics: &BipedalWalkerPhysics) {
-    let hull_x: f32 = state.hull_x.clone().into_scalar().elem();
-    let hull_y: f32 = state.hull_y.clone().into_scalar().elem();
-    let hull_angle: f32 = state.hull_angle.clone().into_scalar().elem();
+fn draw_simulation<B: Backend>(state: &PhysicsState<B>, physics: &WalkerPhysics) {
+    let x_data = state.x.clone().into_data().convert::<f32>();
+    let y_data = state.y.clone().into_data().convert::<f32>();
+    let angles_data = state.angles.clone().into_data().convert::<f32>();
+
+    let x_vec = x_data.as_slice::<f32>().unwrap();
+    let y_vec = y_data.as_slice::<f32>().unwrap();
+    let angles_vec = angles_data.as_slice::<f32>().unwrap();
+
+    let hull_x = x_vec[0];
+    let hull_y = y_vec[0];
 
     let screen_w = screen_width();
     let screen_h = screen_height();
@@ -76,48 +84,36 @@ fn draw_simulation<B: Backend>(state: &PhysicsState<B>, physics: &BipedalWalkerP
     // Ground
     draw_line(0.0, ground_y, screen_w, ground_y, 2.0, BLACK);
 
-    // Hull
-    let half_w = 20.0;
-    let half_h = 10.0;
-    let cos_a = hull_angle.cos();
-    let sin_a = hull_angle.sin();
+    let mut joint_idx = 0;
 
-    let transform =
-        |x: f32, y: f32| vec2(draw_x + x * cos_a - y * sin_a, draw_y + x * sin_a + y * cos_a);
+    fn draw_recursive(
+        segments: &[Segment],
+        px: f32,
+        py: f32,
+        pa: f32,
+        angles: &[f32],
+        idx: &mut usize,
+        scale: f32,
+    ) {
+        for s in segments {
+            let a = pa + angles[*idx];
+            let ex = px + a.sin() * s.length * scale;
+            let ey = py + a.cos() * s.length * scale;
+            draw_line(px, py, ex, ey, 4.0, BLACK);
+            *idx += 1;
+            draw_recursive(&s.children, ex, ey, a, angles, idx, scale);
+        }
+    }
 
-    let p1 = transform(-half_w, -half_h);
-    let p2 = transform(half_w, -half_h);
-    let p3 = transform(half_w, half_h);
-    let p4 = transform(-half_w, half_h);
-
-    draw_triangle(p1, p2, p3, BLUE);
-    draw_triangle(p1, p3, p4, BLUE);
-
-    let thigh_len = physics.leg_length * 0.5 * scale;
-    let shank_len = physics.leg_length * 0.5 * scale;
-
-    let draw_leg = |hip_angle: f32, knee_angle: f32, color: Color| {
-        let hip_x = draw_x;
-        let hip_y = draw_y;
-
-        let abs_hip_angle = hull_angle + hip_angle;
-        let thigh_end_x = hip_x + abs_hip_angle.sin() * thigh_len;
-        let thigh_end_y = hip_y + abs_hip_angle.cos() * thigh_len;
-        draw_line(hip_x, hip_y, thigh_end_x, thigh_end_y, 4.0, color);
-
-        let knee_abs_angle = abs_hip_angle + knee_angle;
-        let foot_x = thigh_end_x + knee_abs_angle.sin() * shank_len;
-        let foot_y = thigh_end_y + knee_abs_angle.cos() * shank_len;
-        draw_line(thigh_end_x, thigh_end_y, foot_x, foot_y, 4.0, color);
-    };
-
-    let l_hip: f32 = state.left_hip_angle.clone().into_scalar().elem();
-    let l_knee: f32 = state.left_knee_angle.clone().into_scalar().elem();
-    let r_hip: f32 = state.right_hip_angle.clone().into_scalar().elem();
-    let r_knee: f32 = state.right_knee_angle.clone().into_scalar().elem();
-
-    draw_leg(l_hip, l_knee, RED);
-    draw_leg(r_hip, r_knee, GREEN);
+    draw_recursive(
+        std::slice::from_ref(&physics.morphology.root),
+        draw_x,
+        draw_y,
+        0.0,
+        &angles_vec,
+        &mut joint_idx,
+        scale,
+    );
 
     draw_text(&format!("X: {:.2}", hull_x), 20.0, 20.0, 20.0, BLACK);
 }
