@@ -67,10 +67,8 @@ fn draw_simulation<B: Backend>(state: &PhysicsState<B>, physics: &WalkerPhysics)
     let root_x = kin.root_x.to_data().as_slice::<f32>().unwrap()[0];
     let root_y = kin.root_y.to_data().as_slice::<f32>().unwrap()[0];
 
-    let end_x: Vec<f32> =
-        kin.end_x.iter().map(|t| t.to_data().as_slice::<f32>().unwrap()[0]).collect();
-    let end_y: Vec<f32> =
-        kin.end_y.iter().map(|t| t.to_data().as_slice::<f32>().unwrap()[0]).collect();
+    let end_x: Vec<f32> = kin.end_x.to_data().as_slice::<f32>().unwrap().to_vec();
+    let end_y: Vec<f32> = kin.end_y.to_data().as_slice::<f32>().unwrap().to_vec();
 
     let screen_w = screen_width();
     let screen_h = screen_height();

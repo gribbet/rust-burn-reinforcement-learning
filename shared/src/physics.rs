@@ -9,12 +9,6 @@ pub struct Segment {
     pub children: Vec<Segment>,
 }
 
-impl Segment {
-    pub fn mass(&self) -> f32 {
-        self.length * 5.0
-    }
-}
-
 #[derive(Clone, Debug)]
 pub struct Morphology {
     pub root: Segment,
@@ -99,10 +93,10 @@ pub struct Kinematics<B: Backend> {
     pub root_vy: Tensor<B, 1>,
     pub rel_com_x: Tensor<B, 1>,
     pub rel_com_y: Tensor<B, 1>,
-    pub end_x: Vec<Tensor<B, 1>>,
-    pub end_y: Vec<Tensor<B, 1>>,
-    pub end_vx: Vec<Tensor<B, 1>>,
-    pub end_vy: Vec<Tensor<B, 1>>,
+    pub end_x: Tensor<B, 2>,
+    pub end_y: Tensor<B, 2>,
+    pub end_vx: Tensor<B, 2>,
+    pub end_vy: Tensor<B, 2>,
 }
 
 pub struct WalkerPhysics {
@@ -116,6 +110,7 @@ pub struct WalkerPhysics {
     pub ground_stiffness: f32,
     pub joint_limit_stiffness: f32,
     pub friction_sharpness: f32,
+    pub mass_density: f32,
 }
 
 impl Default for WalkerPhysics {
@@ -131,6 +126,7 @@ impl Default for WalkerPhysics {
             ground_stiffness: 5000.0,
             joint_limit_stiffness: 1000.0,
             friction_sharpness: 1.0,
+            mass_density: 5.0,
         }
     }
 }
@@ -158,36 +154,28 @@ impl WalkerPhysics {
         let device = &state.x.device();
         let num_segments = self.morphology.num_joints();
 
-        let mut segment_angles = Vec::with_capacity(num_segments);
-        let mut segment_vs = Vec::with_capacity(num_segments);
-        for i in 0..num_segments {
-            segment_angles
-                .push(state.angles.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
-            segment_vs.push(state.v_angles.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
-        }
-
         let flat_segments = self.get_flat_segments();
 
-        let mut rel_end_x: Vec<Tensor<B, 1>> = Vec::with_capacity(flat_segments.len());
-        let mut rel_end_y: Vec<Tensor<B, 1>> = Vec::with_capacity(flat_segments.len());
-        let mut rel_end_vx: Vec<Tensor<B, 1>> = Vec::with_capacity(flat_segments.len());
-        let mut rel_end_vy: Vec<Tensor<B, 1>> = Vec::with_capacity(flat_segments.len());
-        let mut abs_angle: Vec<Tensor<B, 1>> = Vec::with_capacity(flat_segments.len());
-        let mut abs_v_angle: Vec<Tensor<B, 1>> = Vec::with_capacity(flat_segments.len());
+        let mut rel_end_x_vec: Vec<Tensor<B, 1>> = Vec::with_capacity(num_segments);
+        let mut rel_end_y_vec: Vec<Tensor<B, 1>> = Vec::with_capacity(num_segments);
+        let mut rel_end_vx_vec: Vec<Tensor<B, 1>> = Vec::with_capacity(num_segments);
+        let mut rel_end_vy_vec: Vec<Tensor<B, 1>> = Vec::with_capacity(num_segments);
+        let mut abs_angle_vec: Vec<Tensor<B, 1>> = Vec::with_capacity(num_segments);
+        let mut abs_v_angle_vec: Vec<Tensor<B, 1>> = Vec::with_capacity(num_segments);
 
         let mut total_mass = 0.0;
         for (i, is) in flat_segments.iter().enumerate() {
-            let j_angle = segment_angles[i].clone();
-            let j_v = segment_vs[i].clone();
+            let j_angle = state.angles.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1);
+            let j_v = state.v_angles.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1);
 
             let (px, py, pa, pvx, pvy, pva) = match is.parent_idx {
                 Some(p_idx) => (
-                    rel_end_x[p_idx].clone(),
-                    rel_end_y[p_idx].clone(),
-                    abs_angle[p_idx].clone(),
-                    rel_end_vx[p_idx].clone(),
-                    rel_end_vy[p_idx].clone(),
-                    abs_v_angle[p_idx].clone(),
+                    rel_end_x_vec[p_idx].clone(),
+                    rel_end_y_vec[p_idx].clone(),
+                    abs_angle_vec[p_idx].clone(),
+                    rel_end_vx_vec[p_idx].clone(),
+                    rel_end_vy_vec[p_idx].clone(),
+                    abs_v_angle_vec[p_idx].clone(),
                 ),
                 None => (
                     Tensor::zeros([batch_size], device),
@@ -207,13 +195,13 @@ impl WalkerPhysics {
             let evx = pvx + va.clone() * a.clone().cos() * is.segment.length;
             let evy = pvy + va.clone() * a.clone().sin() * is.segment.length;
 
-            rel_end_x.push(ex);
-            rel_end_y.push(ey);
-            rel_end_vx.push(evx);
-            rel_end_vy.push(evy);
-            abs_angle.push(a);
-            abs_v_angle.push(va);
-            total_mass += is.segment.mass();
+            rel_end_x_vec.push(ex);
+            rel_end_y_vec.push(ey);
+            rel_end_vx_vec.push(evx);
+            rel_end_vy_vec.push(evy);
+            abs_angle_vec.push(a);
+            abs_v_angle_vec.push(va);
+            total_mass += is.segment.length * self.mass_density;
         }
 
         let mut rel_com_x = Tensor::zeros([batch_size], device);
@@ -224,10 +212,10 @@ impl WalkerPhysics {
         for i in 0..flat_segments.len() {
             let (px, py, pvx, pvy) = match flat_segments[i].parent_idx {
                 Some(p_idx) => (
-                    rel_end_x[p_idx].clone(),
-                    rel_end_y[p_idx].clone(),
-                    rel_end_vx[p_idx].clone(),
-                    rel_end_vy[p_idx].clone(),
+                    rel_end_x_vec[p_idx].clone(),
+                    rel_end_y_vec[p_idx].clone(),
+                    rel_end_vx_vec[p_idx].clone(),
+                    rel_end_vy_vec[p_idx].clone(),
                 ),
                 None => (
                     Tensor::zeros([batch_size], device),
@@ -236,15 +224,16 @@ impl WalkerPhysics {
                     Tensor::zeros([batch_size], device),
                 ),
             };
-            let cx = (px + rel_end_x[i].clone()) * 0.5;
-            let cy = (py + rel_end_y[i].clone()) * 0.5;
-            let cvx = (pvx + rel_end_vx[i].clone()) * 0.5;
-            let cvy = (pvy + rel_end_vy[i].clone()) * 0.5;
+            let cx = (px + rel_end_x_vec[i].clone()) * 0.5;
+            let cy = (py + rel_end_y_vec[i].clone()) * 0.5;
+            let cvx = (pvx + rel_end_vx_vec[i].clone()) * 0.5;
+            let cvy = (pvy + rel_end_vy_vec[i].clone()) * 0.5;
 
-            rel_com_x = rel_com_x + cx * flat_segments[i].segment.mass();
-            rel_com_y = rel_com_y + cy * flat_segments[i].segment.mass();
-            rel_com_vx = rel_com_vx + cvx * flat_segments[i].segment.mass();
-            rel_com_vy = rel_com_vy + cvy * flat_segments[i].segment.mass();
+            let m = flat_segments[i].segment.length * self.mass_density;
+            rel_com_x = rel_com_x + cx * m;
+            rel_com_y = rel_com_y + cy * m;
+            rel_com_vx = rel_com_vx + cvx * m;
+            rel_com_vy = rel_com_vy + cvy * m;
         }
         rel_com_x = rel_com_x / total_mass;
         rel_com_y = rel_com_y / total_mass;
@@ -256,17 +245,22 @@ impl WalkerPhysics {
         let root_vx = state.vx.clone() - rel_com_vx;
         let root_vy = state.vy.clone() - rel_com_vy;
 
-        let mut end_x = Vec::with_capacity(flat_segments.len());
-        let mut end_y = Vec::with_capacity(flat_segments.len());
-        let mut end_vx = Vec::with_capacity(flat_segments.len());
-        let mut end_vy = Vec::with_capacity(flat_segments.len());
-
-        for i in 0..flat_segments.len() {
-            end_x.push(rel_end_x[i].clone() + root_x.clone());
-            end_y.push(rel_end_y[i].clone() + root_y.clone());
-            end_vx.push(rel_end_vx[i].clone() + root_vx.clone());
-            end_vy.push(rel_end_vy[i].clone() + root_vy.clone());
-        }
+        let end_x = Tensor::stack(
+            rel_end_x_vec.into_iter().map(|t| t + root_x.clone()).collect::<Vec<_>>(),
+            1,
+        );
+        let end_y = Tensor::stack(
+            rel_end_y_vec.into_iter().map(|t| t + root_y.clone()).collect::<Vec<_>>(),
+            1,
+        );
+        let end_vx = Tensor::stack(
+            rel_end_vx_vec.into_iter().map(|t| t + root_vx.clone()).collect::<Vec<_>>(),
+            1,
+        );
+        let end_vy = Tensor::stack(
+            rel_end_vy_vec.into_iter().map(|t| t + root_vy.clone()).collect::<Vec<_>>(),
+            1,
+        );
 
         Kinematics {
             root_x,
@@ -305,70 +299,56 @@ impl WalkerPhysics {
         let g = self.gravity;
 
         let kin = self.calculate_kinematics(&state);
-        let end_y = kin.end_y.clone();
-        let end_vx = kin.end_vx.clone();
-
         let flat_with_parents = self.get_flat_segments();
 
-        let mut total_mass = 0.0;
-        for is in &flat_with_parents {
-            total_mass += is.segment.mass();
-        }
+        // Pre-calculate morphology tensors
+        let masses: Tensor<B, 1> = Tensor::from_floats(
+            flat_with_parents
+                .iter()
+                .map(|is| is.segment.length * self.mass_density)
+                .collect::<Vec<_>>()
+                .as_slice(),
+            device,
+        );
+        let lengths: Tensor<B, 1> = Tensor::from_floats(
+            flat_with_parents.iter().map(|is| is.segment.length).collect::<Vec<_>>().as_slice(),
+            device,
+        );
+        let total_mass: f32 =
+            flat_with_parents.iter().map(|is| is.segment.length * self.mass_density).sum();
 
-        // --- 4. Forces and Torques ---
+        // --- 4. Forces and Torques (Vectorized) ---
         let k_g = self.ground_stiffness;
-        let mut fx = Vec::with_capacity(flat_with_parents.len());
-        let mut fy = Vec::with_capacity(flat_with_parents.len());
-        let mut hull_fx_total = Tensor::zeros([batch_size], device);
-        let mut hull_fy_total = Tensor::zeros([batch_size], device);
-        let mut total_d_g = Tensor::zeros([batch_size], device);
+        let d_gs = (masses.clone() * k_g).sqrt() * 2.0; // [num_segments]
+
+        let penetration = kin.end_y.clone().mul_scalar(-1.0).clamp_min(0.0); // [batch, num_segments]
+        let is_contact = kin.end_y.clone().lower_equal_elem(0.0); // [batch, num_segments]
+
+        let fy_val =
+            Tensor::zeros_like(&kin.end_y).mask_where(is_contact.clone(), penetration * k_g);
+        let fx_val = (kin.end_vx.clone() * self.friction_sharpness).tanh()
+            * fy_val.clone()
+            * self.friction
+            * -1.0;
 
         // Root point (top of head) contact force
-        let (root_fx, root_fy) = {
-            let mass = flat_with_parents[0].segment.mass() * 0.5;
-            let d_g = (k_g * mass).sqrt() * 2.0;
-            let y = kin.root_y.clone();
-            let vx = kin.root_vx.clone();
-            let penetration = y.clone().mul_scalar(-1.0).clamp_min(0.0);
-            let is_contact = y.lower_equal_elem(0.0);
-            let fy_val = Tensor::zeros([batch_size], device)
-                .mask_where(is_contact.clone(), penetration * k_g);
-            let fx_val =
-                (vx * self.friction_sharpness).tanh() * fy_val.clone() * self.friction * -1.0;
+        let root_mass = flat_with_parents[0].segment.length * self.mass_density * 0.5;
+        let root_d_g = (k_g * root_mass).sqrt() * 2.0;
+        let root_penetration = kin.root_y.clone().mul_scalar(-1.0).clamp_min(0.0);
+        let root_is_contact = kin.root_y.clone().lower_equal_elem(0.0);
+        let root_fy = Tensor::zeros_like(&kin.root_y)
+            .mask_where(root_is_contact.clone(), root_penetration * k_g);
+        let root_fx = (kin.root_vx.clone() * self.friction_sharpness).tanh()
+            * root_fy.clone()
+            * self.friction
+            * -1.0;
 
-            hull_fx_total = hull_fx_total + fx_val.clone();
-            hull_fy_total = hull_fy_total + fy_val.clone();
-            total_d_g = total_d_g
-                + Tensor::zeros([batch_size], device)
-                    .mask_where(is_contact, Tensor::ones([batch_size], device) * d_g);
-            (fx_val, fy_val)
-        };
+        let hull_fx_total = fx_val.clone().sum_dim(1).squeeze_dim(1) + root_fx.clone();
+        let hull_fy_total =
+            fy_val.clone().sum_dim(1).squeeze_dim(1) + root_fy.clone() - total_mass * g;
 
-        for i in 0..flat_with_parents.len() {
-            let mass = flat_with_parents[i].segment.mass();
-            let d_g = (k_g * mass).sqrt() * 2.0;
-            let y = end_y[i].clone();
-            let vx = end_vx[i].clone();
-
-            let penetration = y.clone().mul_scalar(-1.0).clamp_min(0.0);
-            let is_contact = y.lower_equal_elem(0.0);
-
-            let fy_spring = penetration * k_g;
-            let fy_val =
-                Tensor::zeros([batch_size], device).mask_where(is_contact.clone(), fy_spring);
-
-            let fx_val =
-                (vx * self.friction_sharpness).tanh() * fy_val.clone() * self.friction * -1.0;
-
-            fx.push(fx_val.clone());
-            fy.push(fy_val.clone());
-            hull_fx_total = hull_fx_total + fx_val;
-            hull_fy_total = hull_fy_total + fy_val;
-            total_d_g = total_d_g
-                + Tensor::zeros([batch_size], device)
-                    .mask_where(is_contact, Tensor::ones([batch_size], device) * d_g);
-        }
-        hull_fy_total = hull_fy_total - total_mass * g;
+        let total_d_g = (is_contact.float() * d_gs.unsqueeze_dim::<2>(0)).sum_dim(1).squeeze_dim(1)
+            + root_is_contact.float() * root_d_g;
 
         // --- 5. Subtree Inertia and Mass ---
         let mut subtree_mass = vec![0.0; flat_with_parents.len()];
@@ -376,7 +356,7 @@ impl WalkerPhysics {
 
         for i in (0..flat_with_parents.len()).rev() {
             let seg = flat_with_parents[i].segment;
-            let m = seg.mass();
+            let m = seg.length * self.mass_density;
             let l = seg.length;
             let i_self = (m * l.powi(2)) / 3.0;
 
@@ -389,98 +369,98 @@ impl WalkerPhysics {
                 subtree_inertia[p_idx] += subtree_inertia[i] + subtree_mass[i] * p_l.powi(2);
             }
         }
+        let subtree_inertia_tensor: Tensor<B, 1> =
+            Tensor::from_floats(subtree_inertia.as_slice(), device);
 
-        // Calculate total body inertia about the Center of Mass directly for stability
-        let mut i_com = Tensor::zeros([batch_size], device);
-        for i in 0..flat_with_parents.len() {
-            let m = flat_with_parents[i].segment.mass();
-            let l = flat_with_parents[i].segment.length;
-            let i_self_com = (m * l.powi(2)) / 12.0;
-            let (pkx, pky) = match flat_with_parents[i].parent_idx {
-                Some(p_idx) => (kin.end_x[p_idx].clone(), kin.end_y[p_idx].clone()),
-                None => (kin.root_x.clone(), kin.root_y.clone()),
-            };
-            let scx = (pkx + kin.end_x[i].clone()) * 0.5;
-            let scy = (pky + kin.end_y[i].clone()) * 0.5;
-            let dx = scx - state.x.clone();
-            let dy = scy - state.y.clone();
-            i_com = i_com + (i_self_com + (dx.powf_scalar(2.0) + dy.powf_scalar(2.0)) * m);
+        // Total body inertia about COM (Vectorized)
+        let i_self_com = (masses.clone() * lengths.powf_scalar(2.0)) / 12.0; // [num_segments]
+
+        let mut pkx_vec = Vec::with_capacity(num_segments);
+        let mut pky_vec = Vec::with_capacity(num_segments);
+        for i in 0..num_segments {
+            match flat_with_parents[i].parent_idx {
+                Some(p_idx) => {
+                    pkx_vec.push(kin.end_x.clone().slice([0..batch_size, p_idx..p_idx + 1]));
+                    pky_vec.push(kin.end_y.clone().slice([0..batch_size, p_idx..p_idx + 1]));
+                }
+                None => {
+                    pkx_vec.push(kin.root_x.clone().unsqueeze_dim::<2>(1));
+                    pky_vec.push(kin.root_y.clone().unsqueeze_dim::<2>(1));
+                }
+            }
         }
-        let i_com = i_com.clamp_min(0.01);
+        let pkx = Tensor::cat(pkx_vec, 1);
+        let pky = Tensor::cat(pky_vec, 1);
+
+        let scx = (pkx.clone() + kin.end_x.clone()) * 0.5;
+        let scy = (pky.clone() + kin.end_y.clone()) * 0.5;
+        let dx = scx - state.x.clone().unsqueeze_dim::<2>(1);
+        let dy = scy - state.y.clone().unsqueeze_dim::<2>(1);
+        let i_com: Tensor<B, 1> = (i_self_com.unsqueeze_dim::<2>(0)
+            + (dx.powf_scalar(2.0) + dy.powf_scalar(2.0)) * masses.clone().unsqueeze_dim::<2>(0))
+        .sum_dim(1)
+        .squeeze_dim(1)
+        .clamp_min(0.01);
+
+        // --- 6. Recursive Torque Calculation ---
+        let cross_product_vec =
+            |rx: Tensor<B, 2>, ry: Tensor<B, 2>, fx: Tensor<B, 2>, fy: Tensor<B, 2>| {
+                rx * fy - ry * fx
+            };
+
+        let f_ext_x = fx_val.clone();
+        let f_ext_y = fy_val.clone() - masses.clone().unsqueeze_dim::<2>(0) * g;
+
+        let t_contact = cross_product_vec(
+            kin.end_x.clone() - pkx.clone(),
+            kin.end_y.clone() - pky.clone(),
+            fx_val.clone(),
+            fy_val.clone(),
+        );
+        let t_grav = cross_product_vec(
+            (pkx.clone() + kin.end_x.clone()) * 0.5 - pkx.clone(),
+            (pky.clone() + kin.end_y.clone()) * 0.5 - pky.clone(),
+            Tensor::zeros_like(&f_ext_x),
+            Tensor::ones_like(&f_ext_x) * (-masses.clone().unsqueeze_dim::<2>(0) * g),
+        );
+
+        let seg_t_ext = t_contact + t_grav;
+
+        let mut subtree_fx = Vec::with_capacity(num_segments);
+        let mut subtree_fy = Vec::with_capacity(num_segments);
+        let mut subtree_t_ext = Vec::with_capacity(num_segments);
+
+        for i in 0..num_segments {
+            subtree_fx.push(f_ext_x.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
+            subtree_fy.push(f_ext_y.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
+            subtree_t_ext.push(seg_t_ext.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
+        }
+
+        // Add root point force to root segment
+        let root_t_ext = (kin.root_x.clone() - state.x.clone()) * root_fy.clone()
+            - (kin.root_y.clone() - state.y.clone()) * root_fx.clone();
+        subtree_fx[0] = subtree_fx[0].clone() + root_fx;
+        subtree_fy[0] = subtree_fy[0].clone() + root_fy;
+        subtree_t_ext[0] = subtree_t_ext[0].clone() + root_t_ext;
 
         let cross_product = |rx: Tensor<B, 1>,
                              ry: Tensor<B, 1>,
                              fx: Tensor<B, 1>,
                              fy: Tensor<B, 1>| { rx * fy - ry * fx };
 
-        let mut segment_angles = Vec::with_capacity(num_segments);
-        let mut segment_vs = Vec::with_capacity(num_segments);
-        let mut actions = Vec::with_capacity(num_segments);
-        for i in 0..num_segments {
-            segment_angles
-                .push(state.angles.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
-            segment_vs.push(state.v_angles.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
-            actions.push(action.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
-        }
-
-        // --- 6. Recursive Torque Calculation ---
-        let mut seg_fx = Vec::with_capacity(num_segments);
-        let mut seg_fy = Vec::with_capacity(num_segments);
-        let mut seg_t_ext = Vec::with_capacity(num_segments);
-
-        for i in 0..num_segments {
-            let f_ext_x = fx[i].clone();
-            let f_ext_y = fy[i].clone() - flat_with_parents[i].segment.mass() * g;
-
-            seg_fx.push(f_ext_x.clone());
-            seg_fy.push(f_ext_y.clone());
-
-            let (pkx, pky) = match flat_with_parents[i].parent_idx {
-                Some(p_idx) => (kin.end_x[p_idx].clone(), kin.end_y[p_idx].clone()),
-                None => (state.x.clone(), state.y.clone()),
-            };
-
-            let t_contact = cross_product(
-                kin.end_x[i].clone() - pkx.clone(),
-                kin.end_y[i].clone() - pky.clone(),
-                fx[i].clone(),
-                fy[i].clone(),
-            );
-            let t_grav = cross_product(
-                (pkx.clone() + kin.end_x[i].clone()) * 0.5 - pkx,
-                (pky.clone() + kin.end_y[i].clone()) * 0.5 - pky,
-                Tensor::zeros_like(&f_ext_x),
-                Tensor::ones_like(&f_ext_x) * (-flat_with_parents[i].segment.mass() * g),
-            );
-
-            seg_t_ext.push(t_contact + t_grav);
-        }
-
-        // Add root point force to root segment (index 0)
-        seg_fx[0] = seg_fx[0].clone() + root_fx.clone();
-        seg_fy[0] = seg_fy[0].clone() + root_fy.clone();
-        seg_t_ext[0] = seg_t_ext[0].clone()
-            + cross_product(
-                kin.root_x.clone() - state.x.clone(),
-                kin.root_y.clone() - state.y.clone(),
-                root_fx,
-                root_fy,
-            );
-
-        let mut subtree_fx = seg_fx;
-        let mut subtree_fy = seg_fy;
-        let mut subtree_t_ext = seg_t_ext;
-
         for i in (1..num_segments).rev() {
             let p_idx = flat_with_parents[i].parent_idx.unwrap();
 
             let (pjx, pjy) = match flat_with_parents[p_idx].parent_idx {
-                Some(pp_idx) => (kin.end_x[pp_idx].clone(), kin.end_y[pp_idx].clone()),
-                None => (state.x.clone(), state.y.clone()),
+                Some(pp_idx) => (
+                    self.rel_end_x_from_kin(&kin, pp_idx, batch_size),
+                    self.rel_end_y_from_kin(&kin, pp_idx, batch_size),
+                ),
+                None => (Tensor::zeros([batch_size], device), Tensor::zeros([batch_size], device)),
             };
 
-            let rx_child = kin.end_x[p_idx].clone() - pjx;
-            let ry_child = kin.end_y[p_idx].clone() - pjy;
+            let rx_child = self.rel_end_x_from_kin(&kin, p_idx, batch_size) - pjx;
+            let ry_child = self.rel_end_y_from_kin(&kin, p_idx, batch_size) - pjy;
 
             subtree_t_ext[p_idx] = subtree_t_ext[p_idx].clone()
                 + subtree_t_ext[i].clone()
@@ -490,38 +470,40 @@ impl WalkerPhysics {
         }
 
         // --- 7. Internal Torques (Joint Limits, Actions) ---
-        let mut joint_t_int = Vec::with_capacity(num_segments);
         let k_limit_base = self.joint_limit_stiffness;
 
-        for i in 0..num_segments {
-            let is = &flat_with_parents[i];
-            let i_sub = if i == 0 {
-                i_com.clone()
-            } else {
-                Tensor::ones([batch_size], device) * subtree_inertia[i].max(0.01)
-            };
+        let i_sub =
+            subtree_inertia_tensor.unsqueeze_dim::<2>(0).repeat(&[batch_size, 1]).clamp_min(0.01);
+        let i_sub = i_sub.slice_assign([0..batch_size, 0..1], i_com.unsqueeze_dim::<2>(1));
 
-            let j_angle = segment_angles[i].clone();
-            let j_v = segment_vs[i].clone();
+        let act = action * self.torque_magnitude * i_sub.clone();
+        let act = act.slice_assign([0..batch_size, 0..1], Tensor::zeros([batch_size, 1], device));
 
-            let act = if i == 0 {
-                Tensor::zeros([batch_size], device)
-            } else {
-                actions[i].clone() * self.torque_magnitude * i_sub.clone()
-            };
+        let k_limit = i_sub.clone() * k_limit_base;
+        let d_limit = (k_limit.clone() * i_sub.clone()).sqrt() * 2.0;
 
-            let k_limit = i_sub.clone() * k_limit_base;
-            let d_limit = (k_limit.clone() * i_sub.clone()).sqrt() * 2.0;
-            let diff_min = j_angle.clone().neg().add_scalar(is.segment.angle_min);
-            let t_min = (diff_min.clone().clamp_min(0.0) * k_limit.clone()
-                - j_v.clone() * d_limit.clone())
-            .mask_where(diff_min.lower_elem(0.0), Tensor::zeros_like(&j_angle));
-            let diff_max = j_angle.clone().add_scalar(-is.segment.angle_max);
-            let t_max = (diff_max.clone().clamp_min(0.0) * k_limit + j_v.clone() * d_limit) * -1.0;
-            let t_max = t_max.mask_where(diff_max.lower_elem(0.0), Tensor::zeros_like(&j_angle));
+        let mins: Tensor<B, 2> = Tensor::<B, 1>::from_floats(
+            flat_with_parents.iter().map(|is| is.segment.angle_min).collect::<Vec<_>>().as_slice(),
+            device,
+        )
+        .unsqueeze_dim::<2>(0);
+        let maxs: Tensor<B, 2> = Tensor::<B, 1>::from_floats(
+            flat_with_parents.iter().map(|is| is.segment.angle_max).collect::<Vec<_>>().as_slice(),
+            device,
+        )
+        .unsqueeze_dim::<2>(0);
 
-            joint_t_int.push(act + t_min + t_max);
-        }
+        let diff_min = state.angles.clone().neg().add_scalar(0.0) + mins;
+        let t_min = (diff_min.clone().clamp_min(0.0) * k_limit.clone()
+            - state.v_angles.clone() * d_limit.clone())
+        .mask_where(diff_min.lower_elem(0.0), Tensor::zeros_like(&state.angles));
+
+        let diff_max = state.angles.clone() - maxs;
+        let t_max =
+            (diff_max.clone().clamp_min(0.0) * k_limit + state.v_angles.clone() * d_limit) * -1.0;
+        let t_max = t_max.mask_where(diff_max.lower_elem(0.0), Tensor::zeros_like(&state.angles));
+
+        let joint_t_int = act + t_min + t_max;
 
         // --- 8. Integration ---
         let dt = self.time_step / self.sub_steps as f32;
@@ -532,20 +514,12 @@ impl WalkerPhysics {
         let next_com_x = state.x + next_com_vx.clone() * dt;
         let next_com_y = state.y + next_com_vy.clone() * dt;
 
-        let mut next_segment_vs = Vec::with_capacity(num_segments);
-        for i in 0..num_segments {
-            let i_sub = if i == 0 {
-                i_com.clone()
-            } else {
-                Tensor::ones([batch_size], device) * subtree_inertia[i].max(0.01)
-            };
-            let d_joint = i_sub.clone() * self.joint_damping * 10.0;
-            let nv = (segment_vs[i].clone()
-                + ((joint_t_int[i].clone() + subtree_t_ext[i].clone()) / i_sub.clone()) * dt)
-                / (Tensor::ones_like(&i_sub) + (d_joint / i_sub) * dt);
-            next_segment_vs.push(nv.unsqueeze_dim(1));
-        }
-        let next_segment_vs = Tensor::cat(next_segment_vs, 1);
+        let d_joint = i_sub.clone() * self.joint_damping * 10.0;
+        let subtree_t_ext_tensor = Tensor::stack(subtree_t_ext, 1);
+
+        let next_segment_vs = (state.v_angles.clone()
+            + ((joint_t_int + subtree_t_ext_tensor) / i_sub.clone()) * dt)
+            / (Tensor::ones_like(&i_sub) + (d_joint / i_sub) * dt);
         let next_segment_angles = state.angles.clone() + next_segment_vs.clone() * dt;
 
         PhysicsState {
@@ -560,26 +534,37 @@ impl WalkerPhysics {
         }
     }
 
-    pub fn get_observation<B: Backend>(&self, state: &PhysicsState<B>) -> Tensor<B, 2> {
-        let num_segments = self.morphology.num_joints();
+    fn rel_end_x_from_kin<B: Backend>(
+        &self,
+        kin: &Kinematics<B>,
+        idx: usize,
+        batch_size: usize,
+    ) -> Tensor<B, 1> {
+        kin.end_x.clone().slice([0..batch_size, idx..idx + 1]).squeeze_dim(1) - kin.root_x.clone()
+    }
 
+    fn rel_end_y_from_kin<B: Backend>(
+        &self,
+        kin: &Kinematics<B>,
+        idx: usize,
+        batch_size: usize,
+    ) -> Tensor<B, 1> {
+        kin.end_y.clone().slice([0..batch_size, idx..idx + 1]).squeeze_dim(1) - kin.root_y.clone()
+    }
+
+    pub fn get_observation<B: Backend>(&self, state: &PhysicsState<B>) -> Tensor<B, 2> {
         let kin = self.calculate_kinematics(state);
         let segment_angles = state.angles.clone();
         let segment_vs = state.v_angles.clone() * 0.1;
 
         // Contacts
-        let mut contacts = Vec::with_capacity(num_segments);
-        for i in 0..num_segments {
-            let ey = kin.end_y[i].clone();
-            contacts.push(ey.lower_equal_elem(0.0).float().unsqueeze_dim(1));
-        }
+        let contacts = kin.end_y.lower_equal_elem(0.0).float();
 
         let hull_y = state.y.clone().unsqueeze_dim(1);
         let hull_vx = state.vx.clone().unsqueeze_dim(1) * 0.1;
         let hull_vy = state.vy.clone().unsqueeze_dim(1) * 0.1;
 
-        let mut obs = vec![hull_y - 0.8, segment_angles, hull_vx, hull_vy, segment_vs];
-        obs.extend(contacts);
+        let mut obs = vec![hull_y - 0.8, segment_angles, hull_vx, hull_vy, segment_vs, contacts];
         obs.push(state.target_velocity.clone().unsqueeze_dim(1));
         Tensor::cat(obs, 1)
     }
