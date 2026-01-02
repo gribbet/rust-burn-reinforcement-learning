@@ -92,24 +92,24 @@ impl TrainingEnv {
         state: PhysicsState<B>,
         action: Tensor<B, 2>,
     ) -> TrainingStep<B> {
-        let action = action.clamp(-1.0, 1.0);
+        let action = action.tanh();
 
         // Run physics step (internally handles sub-steps)
         let next_state = self.physics.step(state.clone(), action.clone());
 
         // Done conditions
-        let is_fallen = next_state.y.clone().lower_equal_elem(1.0);
+        let is_fallen = next_state.y.clone().lower_equal_elem(0.5);
 
         // Reward function
         let distance = next_state.x.clone() - state.x.clone();
         let progress = (distance.clone() * state.target_velocity.clone()) * 100.0; // Reward based on target direction
         let progress = progress.mask_where(is_fallen.clone(), Tensor::zeros_like(&distance));
 
-        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim(1) * -1.0; // Efficiency penalty
+        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim(1) * -0.0; // Efficiency penalty
 
         let survival = (Tensor::ones_like(&progress) * 1.0)
             .mask_where(is_fallen.clone(), Tensor::ones_like(&progress) * -100.0);
-        let reward = progress + torque_penalty;
+        let reward = progress + torque_penalty + survival * 0.0;
 
         let is_max_steps = next_state.time.clone().greater_equal_elem(self.max_steps);
 

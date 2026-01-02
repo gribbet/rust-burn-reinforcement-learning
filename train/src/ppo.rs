@@ -296,28 +296,7 @@ fn collect_rollout<B: AutodiffBackend>(
         // Update cumulative reward
         *current_episode_rewards = current_episode_rewards.clone() + reward.clone();
 
-        // Check for done episodes and extract rewards
         let is_done = done.clone().bool();
-        let done_cpu = done.clone().into_data();
-        let reward_cpu = current_episode_rewards.clone().into_data();
-        let is_fallen_cpu = is_fallen.clone().into_data();
-
-        let done_slice = done_cpu.as_slice::<i64>().unwrap();
-        let reward_slice = reward_cpu.as_slice::<f32>().unwrap();
-        let is_fallen_slice = is_fallen_cpu.as_slice::<i64>().unwrap();
-
-        for (idx, &d) in done_slice.iter().enumerate() {
-            if d == 1 {
-                rollout.episode_rewards.push(reward_slice[idx]);
-                if is_fallen_slice[idx] == 1 {
-                    rollout.fallen_episodes += 1;
-                }
-            }
-        }
-
-        *current_episode_rewards = current_episode_rewards
-            .clone()
-            .mask_where(is_done.clone(), Tensor::zeros_like(current_episode_rewards));
 
         rollout.push(
             observation.clone(),
@@ -326,8 +305,13 @@ fn collect_rollout<B: AutodiffBackend>(
             value,
             reward,
             done.clone(),
-            is_fallen,
+            is_fallen.clone(),
+            current_episode_rewards.clone(),
         );
+
+        *current_episode_rewards = current_episode_rewards
+            .clone()
+            .mask_where(is_done.clone(), Tensor::zeros_like(current_episode_rewards));
 
         observation = step.observation;
         state = step.state;
@@ -338,6 +322,27 @@ fn collect_rollout<B: AutodiffBackend>(
             reset_observation.clone(),
         );
         state = state.mask_where(is_done, reset_state.clone());
+    }
+
+    // Mega-Sync: Concatenate all steps into single tensors before pulling to CPU
+    let all_dones = Tensor::cat(rollout.dones.clone(), 0).into_data();
+    let all_rewards = Tensor::cat(rollout.cumulative_rewards.clone(), 0).into_data();
+    let all_is_fallens = Tensor::cat(rollout.is_fallens.clone(), 0).into_data();
+
+    let done_slice = all_dones.as_slice::<i64>().unwrap();
+    let reward_slice = all_rewards.as_slice::<f32>().unwrap();
+    let is_fallen_slice = all_is_fallens.as_slice::<i64>().unwrap();
+
+    for step in 0..rollout_length {
+        let offset = step * environments_count;
+        for idx in 0..environments_count {
+            if done_slice[offset + idx] == 1 {
+                rollout.episode_rewards.push(reward_slice[offset + idx]);
+                if is_fallen_slice[offset + idx] == 1 {
+                    rollout.fallen_episodes += 1;
+                }
+            }
+        }
     }
 
     *observation_outer = Tensor::from_inner(observation.clone());
@@ -353,6 +358,8 @@ struct Rollout<B: Backend> {
     values: Vec<Tensor<B, 1>>,
     rewards: Vec<Tensor<B, 1>>,
     dones: Vec<Tensor<B, 1, Int>>,
+    is_fallens: Vec<Tensor<B, 1, Int>>,
+    cumulative_rewards: Vec<Tensor<B, 1>>,
     fallen_episodes: usize,
     episode_rewards: Vec<f32>,
 }
@@ -366,6 +373,8 @@ impl<B: Backend> Rollout<B> {
             values: Vec::with_capacity(capacity),
             rewards: Vec::with_capacity(capacity),
             dones: Vec::with_capacity(capacity),
+            is_fallens: Vec::with_capacity(capacity),
+            cumulative_rewards: Vec::with_capacity(capacity),
             fallen_episodes: 0,
             episode_rewards: Vec::new(),
         }
@@ -379,7 +388,8 @@ impl<B: Backend> Rollout<B> {
         value: Tensor<B, 1>,
         reward: Tensor<B, 1>,
         done: Tensor<B, 1, Int>,
-        _is_fallen: Tensor<B, 1, Int>,
+        is_fallen: Tensor<B, 1, Int>,
+        cumulative_reward: Tensor<B, 1>,
     ) {
         self.observations.push(observation);
         self.actions.push(action);
@@ -387,6 +397,8 @@ impl<B: Backend> Rollout<B> {
         self.values.push(value);
         self.rewards.push(reward);
         self.dones.push(done);
+        self.is_fallens.push(is_fallen);
+        self.cumulative_rewards.push(cumulative_reward);
     }
 }
 
