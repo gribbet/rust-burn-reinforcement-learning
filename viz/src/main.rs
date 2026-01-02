@@ -3,7 +3,7 @@ use burn::prelude::*;
 use burn::record::{BinFileRecorder, FullPrecisionSettings};
 use macroquad::prelude::*;
 use shared::model::ActorCritic;
-use shared::physics::{PhysicsState, Segment, WalkerPhysics};
+use shared::physics::{PhysicsState, Segment, Walker, WalkerConfig};
 
 fn window_conf() -> Conf {
     Conf {
@@ -17,14 +17,15 @@ fn window_conf() -> Conf {
 #[macroquad::main(window_conf)]
 async fn main() {
     let device = LibTorchDevice::Mps;
-    let physics = WalkerPhysics::default();
+    let config = WalkerConfig::default();
+    let walker = Walker::new(config, &device);
 
     // Initialize state with full random range for visualization
-    let mut state = physics.initial_state(1, &device);
+    let mut state = walker.initial_state(1, &device);
 
-    let initial_obs = physics.get_observation(&state);
+    let initial_obs = walker.get_observation(&state);
     let input_dim = initial_obs.dims()[1];
-    let action_dim = physics.morphology.num_joints();
+    let action_dim = walker.action_dim();
     let mut model = ActorCritic::<LibTorch>::new(input_dim, action_dim, &device);
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
     let mut model_loaded = false;
@@ -46,23 +47,23 @@ async fn main() {
         state.target_velocity = Tensor::from_floats([target_vel], &device);
 
         let action = if model_loaded {
-            let obs = physics.get_observation(&state);
+            let obs = walker.get_observation(&state);
             let (mean, _, _) = model.forward(obs);
             mean.tanh()
         } else {
             Tensor::zeros([1, action_dim], &device)
         };
 
-        state = physics.step(state, action.clone());
+        state = walker.step(state, action.clone());
 
-        draw_simulation(&state, &physics);
+        draw_simulation(&state, &walker);
 
         next_frame().await;
     }
 }
 
-fn draw_simulation<B: Backend>(state: &PhysicsState<B>, physics: &WalkerPhysics) {
-    let kin = physics.calculate_kinematics(state);
+fn draw_simulation<B: Backend>(state: &PhysicsState<B>, walker: &Walker<B>) {
+    let kin = walker.calculate_kinematics(state);
 
     let root_x = kin.root_x.to_data().as_slice::<f32>().unwrap()[0];
     let root_y = kin.root_y.to_data().as_slice::<f32>().unwrap()[0];
@@ -92,7 +93,7 @@ fn draw_simulation<B: Backend>(state: &PhysicsState<B>, physics: &WalkerPhysics)
             flatten_with_parents(child, Some(idx), list);
         }
     }
-    flatten_with_parents(&physics.morphology.root, None, &mut flat_with_parents);
+    flatten_with_parents(&walker.config.morphology.root, None, &mut flat_with_parents);
 
     for i in 0..flat_with_parents.len() {
         let (px, py) = match flat_with_parents[i].parent_idx {

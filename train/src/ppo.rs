@@ -38,6 +38,8 @@ pub struct ProximalPolicyOptimizationConfig {
     pub minibatches: usize,
     #[config(default = 0.5)]
     pub max_grad_norm: f32,
+    #[config(default = 1024)]
+    pub max_steps: usize,
 }
 
 pub fn train<B: AutodiffBackend>(
@@ -52,17 +54,20 @@ pub fn train<B: AutodiffBackend>(
         update_epochs,
         minibatches,
         max_grad_norm,
+        max_steps,
         ..
     } = config;
     let mut random_number_generator = StdRng::from_entropy();
-    let environment = TrainingEnv::default();
+    let environment = TrainingEnv::<B::InnerBackend>::new(&device, max_steps);
 
-    let (mut observation, mut state) = environment.reset::<B>(environments_count, &device);
+    let (observation_inner, state_inner) = environment.reset(environments_count, &device);
+    let mut observation = Tensor::<B, 2>::from_inner(observation_inner);
+    let mut state = EnvironmentState::from_inner(state_inner);
     let mut current_episode_rewards =
         Tensor::<B::InnerBackend, 1>::zeros([environments_count], &device);
 
     let input_dimension = observation.dims()[1];
-    let action_dimension = environment.physics.morphology.num_joints();
+    let action_dimension = environment.action_dim();
 
     let mut model = ActorCritic::<B>::new(input_dimension, action_dimension, &device);
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
@@ -255,7 +260,7 @@ fn compute_proximal_policy_optimization_loss<B: AutodiffBackend>(
 
 fn collect_rollout<B: AutodiffBackend>(
     model: &ActorCritic<B>,
-    environment: &TrainingEnv,
+    environment: &TrainingEnv<B::InnerBackend>,
     observation_outer: &mut Tensor<B, 2>,
     state_outer: &mut PhysicsState<B>,
     current_episode_rewards: &mut Tensor<B::InnerBackend, 1>,
@@ -264,7 +269,7 @@ fn collect_rollout<B: AutodiffBackend>(
 ) -> Rollout<B::InnerBackend> {
     let ProximalPolicyOptimizationConfig { environments_count, rollout_length, .. } = *config;
     let model_valid = model.clone().valid();
-    let action_dim = environment.physics.morphology.num_joints();
+    let action_dim = environment.action_dim();
 
     let action_noise = Tensor::<B::InnerBackend, 3>::random(
         [rollout_length, environments_count, action_dim],
@@ -272,8 +277,7 @@ fn collect_rollout<B: AutodiffBackend>(
         device,
     );
 
-    let (reset_observation, reset_state) =
-        environment.reset::<B::InnerBackend>(environments_count, device);
+    let (reset_observation, reset_state) = environment.reset(environments_count, device);
 
     let mut observation = observation_outer.clone().inner();
     let mut state = EnvironmentState::inner(state_outer.clone());

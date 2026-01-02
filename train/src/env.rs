@@ -1,7 +1,7 @@
 use burn::prelude::*;
 use burn::tensor::Distribution;
 use burn::tensor::{backend::AutodiffBackend, Int};
-use shared::physics::{PhysicsState, WalkerPhysics};
+use shared::physics::{PhysicsState, Walker, WalkerConfig};
 
 pub trait EnvironmentState<B: Backend> {
     fn inner<AD: AutodiffBackend<InnerBackend = B>>(state: PhysicsState<AD>) -> Self;
@@ -54,9 +54,9 @@ impl<B: Backend> EnvironmentState<B> for PhysicsState<B> {
     }
 }
 
-pub struct TrainingEnv {
-    pub physics: WalkerPhysics,
-    pub max_steps: i32,
+pub struct TrainingEnv<B: Backend> {
+    walker: Walker<B>,
+    max_steps: usize,
 }
 
 pub struct TrainingStep<B: Backend> {
@@ -67,35 +67,35 @@ pub struct TrainingStep<B: Backend> {
     pub is_fallen: Tensor<B, 1, Int>, // Add this
 }
 
-impl Default for TrainingEnv {
-    fn default() -> Self {
-        Self { physics: WalkerPhysics::default(), max_steps: 1024 }
+impl<B: Backend> TrainingEnv<B> {
+    pub fn new(device: &B::Device, max_steps: usize) -> Self {
+        let config = WalkerConfig::default();
+        let walker = Walker::new(config, device);
+        Self { walker, max_steps }
     }
-}
 
-impl TrainingEnv {
-    pub fn reset<B: Backend>(
+    pub fn action_dim(&self) -> usize {
+        self.walker.action_dim()
+    }
+
+    pub fn reset(
         &self,
         environments_count: usize,
         device: &B::Device,
     ) -> (Tensor<B, 2>, PhysicsState<B>) {
-        let mut state = self.physics.initial_state(environments_count, device);
+        let mut state = self.walker.initial_state(environments_count, device);
 
         state.target_velocity =
             Tensor::<B, 1>::random([environments_count], Distribution::Uniform(1.0, 1.0), device);
 
-        (self.physics.get_observation(&state), state)
+        (self.walker.get_observation(&state), state)
     }
 
-    pub fn step<B: Backend>(
-        &self,
-        state: PhysicsState<B>,
-        action: Tensor<B, 2>,
-    ) -> TrainingStep<B> {
+    pub fn step(&self, state: PhysicsState<B>, action: Tensor<B, 2>) -> TrainingStep<B> {
         let action = action.tanh();
 
         // Run physics step (internally handles sub-steps)
-        let next_state = self.physics.step(state.clone(), action.clone());
+        let next_state = self.walker.step(state.clone(), action.clone());
 
         // Done conditions
         let is_fallen = next_state.y.clone().lower_equal_elem(0.5);
@@ -111,12 +111,12 @@ impl TrainingEnv {
             .mask_where(is_fallen.clone(), Tensor::ones_like(&progress) * -100.0);
         let reward = progress + torque_penalty + survival * 0.0;
 
-        let is_max_steps = next_state.time.clone().greater_equal_elem(self.max_steps);
+        let is_max_steps = next_state.time.clone().greater_equal_elem(self.max_steps as i32);
 
         let done = is_fallen.clone().bool_or(is_max_steps).int();
 
         TrainingStep {
-            observation: self.physics.get_observation(&next_state),
+            observation: self.walker.get_observation(&next_state),
             state: next_state,
             reward,
             done,
