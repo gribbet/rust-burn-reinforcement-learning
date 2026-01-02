@@ -104,9 +104,9 @@ fn draw_simulation<B: Backend>(state: &PhysicsState<B>, physics: &WalkerPhysics)
         let ex = end_x[i];
         let ey = end_y[i];
 
-        let s_px = draw_x_offset + (px - root_x) * scale;
+        let s_px = draw_x_offset + px * scale;
         let s_py = ground_y - py * scale;
-        let s_ex = draw_x_offset + (ex - root_x) * scale;
+        let s_ex = draw_x_offset + ex * scale;
         let s_ey = ground_y - ey * scale;
 
         draw_line(s_px, s_py, s_ex, s_ey, 4.0, BLACK);
@@ -116,7 +116,7 @@ fn draw_simulation<B: Backend>(state: &PhysicsState<B>, physics: &WalkerPhysics)
     // Draw CoM
     let com_x = state.x.clone().to_data().as_slice::<f32>().unwrap()[0];
     let com_y = state.y.clone().to_data().as_slice::<f32>().unwrap()[0];
-    let s_com_x = draw_x_offset + (com_x - root_x) * scale;
+    let s_com_x = draw_x_offset + com_x * scale;
     let s_com_y = ground_y - com_y * scale;
     draw_circle(s_com_x, s_com_y, 5.0, BLUE);
 

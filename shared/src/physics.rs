@@ -20,67 +20,40 @@ pub struct Morphology {
     pub root: Segment,
 }
 
+pub struct InternalSegment<'a> {
+    pub segment: &'a Segment,
+    pub parent_idx: Option<usize>,
+}
+
 impl Morphology {
     pub fn humanoid() -> Self {
         Self {
             root: Segment {
-                length: 0.2,      // Head
-                angle_min: -3.14, // Full range
-                angle_max: 3.14,
+                length: 0.6, // Torso
+                angle_min: -0.5,
+                angle_max: 0.5,
                 children: vec![
-                    // Torso starts at the neck (end of head)
+                    // Left Leg
                     Segment {
-                        length: 0.5,
+                        length: 0.4,
                         angle_min: -1.0,
                         angle_max: 1.0,
-                        children: vec![
-                            // Left Leg
-                            Segment {
-                                length: 0.4,
-                                angle_min: -1.0,
-                                angle_max: 1.0,
-                                children: vec![Segment {
-                                    length: 0.4,
-                                    angle_min: -2.0,
-                                    angle_max: 0.0,
-                                    children: vec![],
-                                }],
-                            },
-                            // Right Leg
-                            Segment {
-                                length: 0.4,
-                                angle_min: -1.0,
-                                angle_max: 1.0,
-                                children: vec![Segment {
-                                    length: 0.4,
-                                    angle_min: -2.0,
-                                    angle_max: 0.0,
-                                    children: vec![],
-                                }],
-                            },
-                        ],
-                    },
-                    // Left Arm
-                    Segment {
-                        length: 0.3,
-                        angle_min: -1.5,
-                        angle_max: 1.5,
                         children: vec![Segment {
-                            length: 0.3,
+                            length: 0.4,
                             angle_min: -2.0,
                             angle_max: 0.0,
                             children: vec![],
                         }],
                     },
-                    // Right Arm
+                    // Right Leg
                     Segment {
-                        length: 0.3,
-                        angle_min: -1.5,
-                        angle_max: 1.5,
+                        length: 0.4,
+                        angle_min: -1.0,
+                        angle_max: 1.0,
                         children: vec![Segment {
-                            length: 0.3,
-                            angle_min: 0.0,
-                            angle_max: 2.0,
+                            length: 0.4,
+                            angle_min: -2.0,
+                            angle_max: 0.0,
                             children: vec![],
                         }],
                     },
@@ -140,6 +113,9 @@ pub struct WalkerPhysics {
     pub torque_magnitude: f32,
     pub joint_damping: f32,
     pub sub_steps: usize,
+    pub ground_stiffness: f32,
+    pub joint_limit_stiffness: f32,
+    pub friction_sharpness: f32,
 }
 
 impl Default for WalkerPhysics {
@@ -152,29 +128,15 @@ impl Default for WalkerPhysics {
             torque_magnitude: 40.0,
             joint_damping: 0.1,
             sub_steps: 2,
+            ground_stiffness: 5000.0,
+            joint_limit_stiffness: 1000.0,
+            friction_sharpness: 1.0,
         }
     }
 }
 
 impl WalkerPhysics {
-    pub fn calculate_kinematics<B: Backend>(&self, state: &PhysicsState<B>) -> Kinematics<B> {
-        let batch_size = state.x.dims()[0];
-        let device = &state.x.device();
-        let num_segments = self.morphology.num_joints();
-
-        let mut segment_angles = Vec::with_capacity(num_segments);
-        let mut segment_vs = Vec::with_capacity(num_segments);
-        for i in 0..num_segments {
-            segment_angles
-                .push(state.angles.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
-            segment_vs.push(state.v_angles.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
-        }
-
-        struct InternalSegment<'a> {
-            segment: &'a Segment,
-            parent_idx: Option<usize>,
-        }
-
+    fn get_flat_segments(&self) -> Vec<InternalSegment<'_>> {
         let mut flat_segments = Vec::new();
         fn flatten_with_parents<'a>(
             s: &'a Segment,
@@ -188,6 +150,23 @@ impl WalkerPhysics {
             }
         }
         flatten_with_parents(&self.morphology.root, None, &mut flat_segments);
+        flat_segments
+    }
+
+    pub fn calculate_kinematics<B: Backend>(&self, state: &PhysicsState<B>) -> Kinematics<B> {
+        let batch_size = state.x.dims()[0];
+        let device = &state.x.device();
+        let num_segments = self.morphology.num_joints();
+
+        let mut segment_angles = Vec::with_capacity(num_segments);
+        let mut segment_vs = Vec::with_capacity(num_segments);
+        for i in 0..num_segments {
+            segment_angles
+                .push(state.angles.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
+            segment_vs.push(state.v_angles.clone().slice([0..batch_size, i..i + 1]).squeeze_dim(1));
+        }
+
+        let flat_segments = self.get_flat_segments();
 
         let mut rel_end_x: Vec<Tensor<B, 1>> = Vec::with_capacity(flat_segments.len());
         let mut rel_end_y: Vec<Tensor<B, 1>> = Vec::with_capacity(flat_segments.len());
@@ -329,23 +308,7 @@ impl WalkerPhysics {
         let end_y = kin.end_y.clone();
         let end_vx = kin.end_vx.clone();
 
-        struct InternalSegment<'a> {
-            segment: &'a Segment,
-            parent_idx: Option<usize>,
-        }
-        let mut flat_with_parents = Vec::new();
-        fn flatten_with_parents<'a>(
-            s: &'a Segment,
-            p: Option<usize>,
-            list: &mut Vec<InternalSegment<'a>>,
-        ) {
-            let idx = list.len();
-            list.push(InternalSegment { segment: s, parent_idx: p });
-            for child in &s.children {
-                flatten_with_parents(child, Some(idx), list);
-            }
-        }
-        flatten_with_parents(&self.morphology.root, None, &mut flat_with_parents);
+        let flat_with_parents = self.get_flat_segments();
 
         let mut total_mass = 0.0;
         for is in &flat_with_parents {
@@ -353,7 +316,7 @@ impl WalkerPhysics {
         }
 
         // --- 4. Forces and Torques ---
-        let k_g = 5000.0;
+        let k_g = self.ground_stiffness;
         let mut fx = Vec::with_capacity(flat_with_parents.len());
         let mut fy = Vec::with_capacity(flat_with_parents.len());
         let mut hull_fx_total = Tensor::zeros([batch_size], device);
@@ -370,7 +333,8 @@ impl WalkerPhysics {
             let is_contact = y.lower_equal_elem(0.0);
             let fy_val = Tensor::zeros([batch_size], device)
                 .mask_where(is_contact.clone(), penetration * k_g);
-            let fx_val = vx.tanh() * fy_val.clone() * self.friction * -1.0;
+            let fx_val =
+                (vx * self.friction_sharpness).tanh() * fy_val.clone() * self.friction * -1.0;
 
             hull_fx_total = hull_fx_total + fx_val.clone();
             hull_fy_total = hull_fy_total + fy_val.clone();
@@ -393,7 +357,8 @@ impl WalkerPhysics {
             let fy_val =
                 Tensor::zeros([batch_size], device).mask_where(is_contact.clone(), fy_spring);
 
-            let fx_val = vx.tanh() * fy_val.clone() * self.friction * -1.0;
+            let fx_val =
+                (vx * self.friction_sharpness).tanh() * fy_val.clone() * self.friction * -1.0;
 
             fx.push(fx_val.clone());
             fy.push(fy_val.clone());
@@ -526,7 +491,7 @@ impl WalkerPhysics {
 
         // --- 7. Internal Torques (Joint Limits, Actions) ---
         let mut joint_t_int = Vec::with_capacity(num_segments);
-        let k_limit_base = 1000.0;
+        let k_limit_base = self.joint_limit_stiffness;
 
         for i in 0..num_segments {
             let is = &flat_with_parents[i];
