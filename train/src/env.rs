@@ -116,7 +116,7 @@ impl<B: Backend> TrainingEnv<B> {
         let progress = (distance.clone() * state.target_velocity.clone()) * 100.0; // Reward based on target direction
         let progress = progress.mask_where(is_fallen.clone(), Tensor::zeros_like(&distance));
 
-        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim(1) * -1.0; // Efficiency penalty
+        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim(1) * 0.0; // Efficiency penalty
 
         let survival = (Tensor::ones_like(&progress) * 1.0)
             .mask_where(is_fallen.clone(), Tensor::ones_like(&progress) * -100.0);
