@@ -38,8 +38,8 @@ pub struct ProximalPolicyOptimizationConfig {
     pub minibatches: usize,
     #[config(default = 0.5)]
     pub max_grad_norm: f32,
-    #[config(default = 1024)]
-    pub max_steps: usize,
+    #[config(default = 10.0)]
+    pub max_time: f32,
 }
 
 pub fn train<B: AutodiffBackend>(
@@ -54,11 +54,11 @@ pub fn train<B: AutodiffBackend>(
         update_epochs,
         minibatches,
         max_grad_norm,
-        max_steps,
+        max_time,
         ..
     } = config;
     let mut random_number_generator = StdRng::from_entropy();
-    let environment = TrainingEnv::<B::InnerBackend>::new(&device, max_steps);
+    let environment = TrainingEnv::<B::InnerBackend>::new(&device, max_time);
 
     let (observation_inner, state_inner) = environment.reset(environments_count, &device);
     let mut observation = Tensor::<B, 2>::from_inner(observation_inner);

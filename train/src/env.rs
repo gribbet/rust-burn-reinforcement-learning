@@ -46,7 +46,7 @@ impl<B: Backend> EnvironmentState<B> for PhysicsState<B> {
 
 pub struct TrainingEnv<B: Backend> {
     walker: Walker<B>,
-    max_steps: usize,
+    max_time: f32,
 }
 
 pub struct TrainingStep<B: Backend> {
@@ -58,10 +58,10 @@ pub struct TrainingStep<B: Backend> {
 }
 
 impl<B: Backend> TrainingEnv<B> {
-    pub fn new(device: &B::Device, max_steps: usize) -> Self {
+    pub fn new(device: &B::Device, max_time: f32) -> Self {
         let config = WalkerConfig::default();
         let walker = Walker::new(config, device);
-        Self { walker, max_steps }
+        Self { walker, max_time }
     }
 
     pub fn action_dim(&self) -> usize {
@@ -96,7 +96,7 @@ impl<B: Backend> TrainingEnv<B> {
             .slice([0..batch_size, 0..1, 1..2])
             .squeeze_dim::<2>(2)
             .squeeze_dim::<1>(1);
-        let is_fallen = root_y.clone().lower_equal_elem(0.5);
+        let is_fallen = root_y.clone().lower_equal_elem(self.walker.config.fall_y);
 
         // Reward function
         let root_x_next = next_state
@@ -122,9 +122,9 @@ impl<B: Backend> TrainingEnv<B> {
             .mask_where(is_fallen.clone(), Tensor::ones_like(&progress) * -100.0);
         let reward = progress + torque_penalty + survival * 0.0;
 
-        let is_max_steps = next_state.time.clone().greater_equal_elem(self.max_steps as f32);
+        let is_max_time = next_state.time.clone().greater_equal_elem(self.max_time);
 
-        let done = is_fallen.clone().bool_or(is_max_steps).int();
+        let done = is_fallen.clone().bool_or(is_max_time).int();
 
         TrainingStep {
             observation: self.walker.get_observation(&next_state),

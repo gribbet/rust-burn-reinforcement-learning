@@ -61,6 +61,7 @@ pub struct WalkerConfig {
     pub torque_magnitude: f32,
     pub iterations: usize,
     pub mass_density: f32,
+    pub fall_y: f32,
 }
 
 impl Default for WalkerConfig {
@@ -71,8 +72,9 @@ impl Default for WalkerConfig {
             time_step: 0.02,
             friction: 1.0,
             torque_magnitude: 40.0,
-            iterations: 4,
+            iterations: 1,
             mass_density: 5.0,
+            fall_y: 0.75,
         }
     }
 }
