@@ -431,18 +431,18 @@ impl<B: Backend> Walker<B> {
         let r_parent = pos_j.clone() - pos_p.clone();
         let r_child = pos_c.clone() - pos_j.clone();
 
-        let r_parent_norm = r_parent.clone().powf_scalar(2.0).sum_dim(2).sqrt().clamp_min(1e-6);
-        let r_child_norm = r_child.clone().powf_scalar(2.0).sum_dim(2).sqrt().clamp_min(1e-6);
+        let r_parent_norm = (r_parent.clone() * r_parent.clone()).sum_dim(2).sqrt().clamp_min(1e-6);
+        let r_child_norm = (r_child.clone() * r_child.clone()).sum_dim(2).sqrt().clamp_min(1e-6);
 
-        let u_parent = r_parent.clone() / r_parent_norm.clone();
-        let u_child = r_child.clone() / r_child_norm.clone();
+        let u_parent = r_parent / r_parent_norm.clone();
+        let u_child = r_child / r_child_norm.clone();
 
         let n_joints = self.joint_pairs.len();
 
         let perp_parent = Tensor::cat(
             vec![
                 u_parent.clone().slice([0..batch_size, 0..n_joints, 1..2]).neg(),
-                u_parent.clone().slice([0..batch_size, 0..n_joints, 0..1]),
+                u_parent.slice([0..batch_size, 0..n_joints, 0..1]),
             ],
             2,
         );
@@ -450,15 +450,15 @@ impl<B: Backend> Walker<B> {
         let perp_child = Tensor::cat(
             vec![
                 u_child.clone().slice([0..batch_size, 0..n_joints, 1..2]).neg(),
-                u_child.clone().slice([0..batch_size, 0..n_joints, 0..1]),
+                u_child.slice([0..batch_size, 0..n_joints, 0..1]),
             ],
             2,
         );
 
-        let torque = action.clone().unsqueeze_dim::<3>(2); // [B, n_joints, 1]
+        let torque = action.unsqueeze_dim::<3>(2); // [B, n_joints, 1]
 
         let f_parent_mag = torque.clone() / r_parent_norm * self.config.torque_magnitude;
-        let f_child_mag = torque.clone() / r_child_norm * self.config.torque_magnitude;
+        let f_child_mag = torque / r_child_norm * self.config.torque_magnitude;
 
         let f_child = perp_child * f_child_mag;
         let f_parent = perp_parent * f_parent_mag;
@@ -481,8 +481,8 @@ impl<B: Backend> Walker<B> {
             let x1 = predicted.clone().select(1, self.edge_idx_1.clone()); // [B, n_edges, 2]
             let x2 = predicted.clone().select(1, self.edge_idx_2.clone());
 
-            let delta = x2.clone() - x1.clone();
-            let dist = delta.clone().powf_scalar(2.0).sum_dim(2).sqrt().clamp_min(1e-6);
+            let delta = x2 - x1;
+            let dist = (delta.clone() * delta.clone()).sum_dim(2).sqrt().clamp_min(1e-6);
 
             let diff = (dist.clone() - self.edge_lengths_reshaped.clone()) / dist;
 
@@ -504,8 +504,8 @@ impl<B: Backend> Walker<B> {
             let u = pos_j.clone() - pos_p.clone();
             let v = pos_c.clone() - pos_j.clone();
 
-            let u_len_sq = u.clone().powf_scalar(2.0).sum_dim(2).clamp_min(1e-6);
-            let v_len_sq = v.clone().powf_scalar(2.0).sum_dim(2).clamp_min(1e-6);
+            let u_len_sq = (u.clone() * u.clone()).sum_dim(2).clamp_min(1e-6);
+            let v_len_sq = (v.clone() * v.clone()).sum_dim(2).clamp_min(1e-6);
 
             // Normals (perpendiculars in 2D: -y, x)
             let u_x = u.clone().slice([0..batch_size, 0..n_joints, 0..1]);
@@ -520,7 +520,7 @@ impl<B: Backend> Walker<B> {
             // Cross product (z): u_x * v_y - u_y * v_x
             let cross = u_x.clone() * v_y.clone() - u_y.clone() * v_x.clone();
             // Dot product: u . v
-            let dot = (u.clone() * v.clone()).sum_dim(2);
+            let dot = (u * v).sum_dim(2);
 
             let angle = crate::math::approx_atan2(cross, dot);
 
@@ -531,22 +531,22 @@ impl<B: Backend> Walker<B> {
                 .min_pair(self.joint_max_limit.clone());
 
             // C = angle - clamped_angle (We want C = 0)
-            let c_val = angle.clone() - clamped_angle;
+            let c_val = angle - clamped_angle;
 
             // Gradients
             // grad_p = u_perp / u_len_sq
             // grad_c = v_perp / v_len_sq
             // grad_j = -(grad_p + grad_c)
 
-            let grad_p = u_perp.clone() / u_len_sq.clone();
-            let grad_c = v_perp.clone() / v_len_sq.clone();
+            let grad_p = u_perp / u_len_sq;
+            let grad_c = v_perp / v_len_sq;
             let grad_j = (grad_p.clone() + grad_c.clone()).neg();
 
             // Lambda denominator
             // sum(w * |grad|^2)
-            let term_p = self.joint_w_p.clone() * grad_p.clone().powf_scalar(2.0).sum_dim(2);
-            let term_c = self.joint_w_c.clone() * grad_c.clone().powf_scalar(2.0).sum_dim(2);
-            let term_j = self.joint_w_j.clone() * grad_j.clone().powf_scalar(2.0).sum_dim(2);
+            let term_p = self.joint_w_p.clone() * (grad_p.clone() * grad_p.clone()).sum_dim(2);
+            let term_c = self.joint_w_c.clone() * (grad_c.clone() * grad_c.clone()).sum_dim(2);
+            let term_j = self.joint_w_j.clone() * (grad_j.clone() * grad_j.clone()).sum_dim(2);
 
             // Compliance alpha (small value for stability)
             let alpha = 1e-6;

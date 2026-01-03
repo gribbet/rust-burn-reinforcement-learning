@@ -411,37 +411,67 @@ fn compute_generalized_advantage_estimation<B: Backend>(
     let ProximalPolicyOptimizationConfig { gamma, generalized_advantage_estimation_lambda, .. } =
         *config;
     let rollout_length = rewards.len();
-    let mut returns = Vec::with_capacity(rollout_length);
-    let mut advantages = Vec::with_capacity(rollout_length);
+    let environments_count = next_value.dims()[0];
+    let device = next_value.device();
 
-    let mut generalized_advantage_estimation =
-        Tensor::<B, 1>::zeros(next_value.dims(), &next_value.device());
-    let mut current_next_value = next_value;
+    // Stack everything into [T, B]
+    let rewards_t =
+        Tensor::cat(rewards.iter().map(|t| t.clone().unsqueeze_dim::<2>(0)).collect(), 0);
+    let values_t = Tensor::cat(values.iter().map(|t| t.clone().unsqueeze_dim::<2>(0)).collect(), 0);
+    let dones_t =
+        Tensor::cat(dones.iter().map(|t| t.clone().float().unsqueeze_dim::<2>(0)).collect(), 0);
+    let done_masks_t = dones_t.clone().equal_elem(0.0).float();
 
-    let environments_count = current_next_value.dims()[0];
-    let all_dones = Tensor::cat(dones.to_vec(), 0);
-    let all_done_masks = all_dones.float().equal_elem(0.0).float();
-    let done_masks = all_done_masks.reshape([rollout_length, environments_count]);
+    // Calculate deltas: delta_t = r_t + gamma * (1-d_t) * V_{t+1} - V_t
+    let next_values = Tensor::cat(
+        vec![values_t.clone().slice([1..rollout_length]), next_value.unsqueeze_dim::<2>(0)],
+        0,
+    );
+    let deltas = rewards_t + next_values * done_masks_t * gamma - values_t.clone();
 
-    for time_step in (0..rollout_length).rev() {
-        let reward = rewards[time_step].clone();
-        let done_mask = done_masks.clone().slice([time_step..time_step + 1]).squeeze_dim::<1>(0);
-        let value = values[time_step].clone();
+    // Calculate advantages using matrix multiplication: A = M * deltas
+    // M[i, k] = (gamma * lambda)^(k-i) * prod_{j=i}^{k-1} (1-d_j)
 
-        let temporal_difference_error =
-            reward + current_next_value * gamma * done_mask.clone() - value.clone();
+    let indices = Tensor::<B, 1, Int>::arange(0..rollout_length as i64, &device).float();
+    let i = indices.clone().reshape([rollout_length, 1]);
+    let k = indices.reshape([1, rollout_length]);
+    let dist = k - i.clone(); // [T, T], dist[i, k] = k - i
+    let triu_mask = dist.clone().greater_equal_elem(0.0).float();
 
-        generalized_advantage_estimation = temporal_difference_error
-            + generalized_advantage_estimation
-                * (gamma * generalized_advantage_estimation_lambda)
-                * done_mask;
+    let decay = (gamma * generalized_advantage_estimation_lambda) as f64;
+    let dist_safe = dist.clone().mask_fill(dist.clone().lower_elem(0.0), 0.0);
+    let powers = (dist_safe * decay.max(1e-10).ln()).exp() * triu_mask;
 
-        returns.push(generalized_advantage_estimation.clone() + value.clone());
-        advantages.push(generalized_advantage_estimation.clone());
+    let c =
+        Tensor::cat(vec![Tensor::zeros([1, environments_count], &device), dones_t.cumsum(0)], 0)
+            .swap_dims(0, 1); // [B, T+1]
 
-        current_next_value = value;
-    }
-    returns.reverse();
-    advantages.reverse();
+    let c_for_k = c.clone().slice([0..environments_count, 0..rollout_length]).reshape([
+        environments_count,
+        1,
+        rollout_length,
+    ]); // [B, 1, T]
+    let c_for_i = c.slice([0..environments_count, 0..rollout_length]).reshape([
+        environments_count,
+        rollout_length,
+        1,
+    ]); // [B, T, 1]
+    let segment_mask = (c_for_k - c_for_i).equal_elem(0.0).float(); // [B, T, T]
+
+    let m = powers.reshape([1, rollout_length, rollout_length]) * segment_mask; // [B, T, T]
+
+    let deltas_b = deltas.swap_dims(0, 1).reshape([environments_count, rollout_length, 1]); // [B, T, 1]
+    let advantages_b = m.matmul(deltas_b).squeeze_dim::<2>(2); // [B, T]
+    let advantages_t = advantages_b.swap_dims(0, 1); // [T, B]
+
+    let returns_t = advantages_t.clone() + values_t;
+
+    let returns = (0..rollout_length)
+        .map(|i| returns_t.clone().slice([i..i + 1]).squeeze_dim::<1>(0))
+        .collect();
+    let advantages = (0..rollout_length)
+        .map(|i| advantages_t.clone().slice([i..i + 1]).squeeze_dim::<1>(0))
+        .collect();
+
     (returns, advantages)
 }
