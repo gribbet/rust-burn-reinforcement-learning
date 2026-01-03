@@ -9,7 +9,6 @@ use burn::{
     record::{BinFileRecorder, FullPrecisionSettings},
     tensor::{backend::AutodiffBackend, Distribution, Int},
 };
-use rand::prelude::*;
 use shared::model::ActorCritic;
 use shared::physics::PhysicsState;
 use std::time::Instant;
@@ -57,7 +56,6 @@ pub fn train<B: AutodiffBackend>(
         max_time,
         ..
     } = config;
-    let mut random_number_generator = StdRng::from_entropy();
     let environment = TrainingEnv::<B::InnerBackend>::new(&device, max_time);
 
     let (observation_inner, state_inner) = environment.reset(environments_count, &device);
@@ -132,12 +130,10 @@ pub fn train<B: AutodiffBackend>(
         let number_of_samples = environments_count * rollout_length;
         let batch_size = number_of_samples / minibatches;
 
-        let mut indices: Vec<i32> = (0..number_of_samples as i32).collect();
-
         for _ in 0..update_epochs {
-            indices.shuffle(&mut random_number_generator);
             let indices_tensor =
-                Tensor::<B, 1, Int>::from_data(TensorData::from(indices.as_slice()), &device);
+                Tensor::<B, 1>::random([number_of_samples], Distribution::Default, &device)
+                    .argsort(0);
 
             let shuffled_observations =
                 observation_tensor.clone().select(0, indices_tensor.clone());
@@ -182,18 +178,15 @@ pub fn train<B: AutodiffBackend>(
         let steps_per_second = number_of_samples as f64 / duration;
 
         if i % 10 == 0 || i == iterations - 1 {
-            let total_episodes = rollout.episode_rewards.len();
+            let total_episodes = rollout.total_episodes;
             let fallen_pct = if total_episodes > 0 {
-                (rollout.fallen_episodes as f64 / total_episodes as f64) * 100.0
+                (rollout.total_fallen as f64 / total_episodes as f64) * 100.0
             } else {
                 0.0
             };
 
-            let avg_episode_reward = if total_episodes > 0 {
-                rollout.episode_rewards.iter().sum::<f32>() / total_episodes as f32
-            } else {
-                0.0
-            };
+            let avg_episode_reward =
+                if total_episodes > 0 { rollout.total_reward / total_episodes as f32 } else { 0.0 };
 
             println!(
                 "Iter {:4} | Reward: {:7.2} | Fallen: {:6.2}% | SPS: {:8.0}",
@@ -328,25 +321,20 @@ fn collect_rollout<B: AutodiffBackend>(
         state = state.mask_where(is_done, reset_state.clone());
     }
 
-    // Mega-Sync: Concatenate all steps into single tensors before pulling to CPU
-    let all_dones = Tensor::cat(rollout.dones.clone(), 0).into_data();
-    let all_rewards = Tensor::cat(rollout.cumulative_rewards.clone(), 0).into_data();
-    let all_is_fallens = Tensor::cat(rollout.is_fallens.clone(), 0).into_data();
+    // Aggregated metrics on GPU to avoid large data transfer
+    let all_dones = Tensor::cat(rollout.dones.clone(), 0);
+    let all_rewards = Tensor::cat(rollout.cumulative_rewards.clone(), 0);
+    let all_is_fallens = Tensor::cat(rollout.is_fallens.clone(), 0);
 
-    let done_slice = all_dones.as_slice::<i64>().unwrap();
-    let reward_slice = all_rewards.as_slice::<f32>().unwrap();
-    let is_fallen_slice = all_is_fallens.as_slice::<i64>().unwrap();
+    let total_episodes = all_dones.clone().sum().into_data().as_slice::<i64>().unwrap()[0] as usize;
 
-    for step in 0..rollout_length {
-        let offset = step * environments_count;
-        for idx in 0..environments_count {
-            if done_slice[offset + idx] == 1 {
-                rollout.episode_rewards.push(reward_slice[offset + idx]);
-                if is_fallen_slice[offset + idx] == 1 {
-                    rollout.fallen_episodes += 1;
-                }
-            }
-        }
+    if total_episodes > 0 {
+        let dones_float = all_dones.clone().float();
+        rollout.total_episodes = total_episodes;
+        rollout.total_fallen =
+            (all_dones * all_is_fallens).sum().into_data().as_slice::<i64>().unwrap()[0] as usize;
+        rollout.total_reward =
+            (dones_float * all_rewards).sum().into_data().as_slice::<f32>().unwrap()[0];
     }
 
     *observation_outer = Tensor::from_inner(observation.clone());
@@ -364,8 +352,9 @@ struct Rollout<B: Backend> {
     dones: Vec<Tensor<B, 1, Int>>,
     is_fallens: Vec<Tensor<B, 1, Int>>,
     cumulative_rewards: Vec<Tensor<B, 1>>,
-    fallen_episodes: usize,
-    episode_rewards: Vec<f32>,
+    total_fallen: usize,
+    total_reward: f32,
+    total_episodes: usize,
 }
 
 impl<B: Backend> Rollout<B> {
@@ -379,8 +368,9 @@ impl<B: Backend> Rollout<B> {
             dones: Vec::with_capacity(capacity),
             is_fallens: Vec::with_capacity(capacity),
             cumulative_rewards: Vec::with_capacity(capacity),
-            fallen_episodes: 0,
-            episode_rewards: Vec::new(),
+            total_fallen: 0,
+            total_reward: 0.0,
+            total_episodes: 0,
         }
     }
 

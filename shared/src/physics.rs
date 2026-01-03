@@ -1,6 +1,5 @@
 use burn::prelude::*;
 use burn::tensor::Int;
-use rand::Rng;
 
 #[derive(Clone, Debug)]
 pub struct Segment {
@@ -135,15 +134,30 @@ impl<B: Backend> Walker<B> {
         let n_particles = n_segments + 1;
         let mut masses_vec = vec![0.0; n_particles];
 
-        // Stack for DFS: (segment, start_node_idx, parent_start_node_idx)
-        let mut stack = vec![(&config.morphology.root, 0usize, None::<usize>)];
+        let mut init_p1 = Vec::new();
+        let mut init_p2 = Vec::new();
+        let mut init_lengths = Vec::new();
+        let mut init_angle_min = Vec::new();
+        let mut init_angle_max = Vec::new();
+        let mut init_parent_edge = Vec::new();
+
+        // Stack for DFS: (segment, start_node_idx, parent_start_node_idx, parent_edge_idx)
+        let mut stack = vec![(&config.morphology.root, 0usize, None::<usize>, None::<usize>)];
         let mut next_particle_id = 1;
 
-        while let Some((seg, start_idx, parent_start_opt)) = stack.pop() {
+        while let Some((seg, start_idx, parent_start_opt, parent_edge_opt)) = stack.pop() {
             let end_idx = next_particle_id;
+            let current_edge_idx = init_p1.len();
             next_particle_id += 1;
 
             edges.push((start_idx, end_idx, seg.length));
+
+            init_p1.push(start_idx);
+            init_p2.push(end_idx);
+            init_lengths.push(seg.length);
+            init_angle_min.push(seg.angle_min);
+            init_angle_max.push(seg.angle_max);
+            init_parent_edge.push(parent_edge_opt);
 
             let seg_mass = seg.length * config.mass_density;
             masses_vec[start_idx] += seg_mass * 0.5;
@@ -156,7 +170,7 @@ impl<B: Backend> Walker<B> {
             }
 
             for child in &seg.children {
-                stack.push((child, end_idx, Some(start_idx)));
+                stack.push((child, end_idx, Some(start_idx), Some(current_edge_idx)));
             }
         }
 
@@ -238,6 +252,12 @@ impl<B: Backend> Walker<B> {
             masses,
             inv_masses,
             n_particles,
+            init_p1,
+            init_p2,
+            init_lengths,
+            init_angle_min,
+            init_angle_max,
+            init_parent_edge,
             _marker: std::marker::PhantomData,
         }
     }
@@ -247,56 +267,56 @@ impl<B: Backend> Walker<B> {
     }
 
     pub fn initial_state(&self, batch_size: usize, device: &B::Device) -> PhysicsState<B> {
-        let mut rng = rand::thread_rng();
-        let mut all_positions = Vec::with_capacity(batch_size * self.n_particles * 2);
+        let mut positions = Tensor::<B, 3>::zeros([batch_size, self.n_particles, 2], device);
 
-        for _ in 0..batch_size {
-            let mut positions = vec![[0.0; 2]; self.n_particles];
-            positions[0] = [0.0, 1.5]; // Root start (Shoulders)
+        // Root start (Shoulders) at [0, 1.5]
+        let root_start = Tensor::<B, 1>::from_floats([0.0, 1.5], device)
+            .reshape([1, 1, 2])
+            .expand([batch_size, 1, 2]);
+        positions = positions.slice_assign([0..batch_size, 0..1, 0..2], root_start);
 
-            // Stack: (segment, start_idx, start_x, start_y, angle)
-            // Root segment is fixed at -PI/2 (Down) - Shoulders to Hips
-            let mut stack = vec![(
-                &self.config.morphology.root,
-                0usize,
-                0.0f32,
-                1.5f32,
-                -std::f32::consts::PI / 2.0,
-            )];
+        let mut edge_angles: Vec<Tensor<B, 1>> = Vec::with_capacity(self.init_p1.len());
 
-            let mut next_particle_id = 1;
+        for i in 0..self.init_p1.len() {
+            let p1 = self.init_p1[i];
+            let p2 = self.init_p2[i];
+            let length = self.init_lengths[i];
+            let angle_min = self.init_angle_min[i];
+            let angle_max = self.init_angle_max[i];
+            let parent_edge_idx = self.init_parent_edge[i];
 
-            while let Some((seg, _start_idx, x, y, angle)) = stack.pop() {
-                let end_idx = next_particle_id;
-                next_particle_id += 1;
+            let (eff_min, eff_max) =
+                if parent_edge_idx.is_none() { (-0.1, 0.1) } else { (angle_min, angle_max) };
 
-                let end_x = x + angle.cos() * seg.length;
-                let end_y = y + angle.sin() * seg.length;
+            let base_angle = if let Some(idx) = parent_edge_idx {
+                edge_angles[idx].clone()
+            } else {
+                Tensor::<B, 1>::from_floats([-std::f32::consts::PI / 2.0], device)
+                    .expand([batch_size])
+            };
 
-                positions[end_idx] = [end_x, end_y];
+            let angle_offset = if (eff_max - eff_min).abs() < 1e-6 {
+                Tensor::zeros([batch_size], device)
+            } else {
+                Tensor::random(
+                    [batch_size],
+                    burn::tensor::Distribution::Uniform(eff_min as f64, eff_max as f64),
+                    device,
+                )
+            };
 
-                for child in &seg.children {
-                    // Children continue relative to parent
-                    let base_angle = angle;
+            let angle = base_angle + angle_offset;
+            edge_angles.push(angle.clone());
 
-                    let angle_offset = rng.gen_range(child.angle_min..=child.angle_max);
-                    let child_angle = base_angle + angle_offset;
+            let cos_angle = angle.clone().cos().reshape([batch_size, 1]);
+            let sin_angle = angle.sin().reshape([batch_size, 1]);
+            let delta = Tensor::cat(vec![cos_angle * length, sin_angle * length], 1)
+                .reshape([batch_size, 1, 2]);
 
-                    stack.push((child, end_idx, end_x, end_y, child_angle));
-                }
-            }
-
-            for p in positions {
-                all_positions.push(p[0]);
-                all_positions.push(p[1]);
-            }
+            let p1_pos = positions.clone().slice([0..batch_size, p1..p1 + 1, 0..2]);
+            let p2_pos = p1_pos + delta;
+            positions = positions.slice_assign([0..batch_size, p2..p2 + 1, 0..2], p2_pos);
         }
-
-        let positions = Tensor::<B, 1>::from_floats(all_positions.as_slice(), device).reshape([
-            batch_size,
-            self.n_particles,
-            2,
-        ]);
 
         let velocities = Tensor::zeros([batch_size, self.n_particles, 2], device);
         let time = Tensor::zeros([batch_size], device);

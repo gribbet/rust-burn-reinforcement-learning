@@ -21,7 +21,7 @@ impl<B: Backend> DiagonalGaussian<B> {
         let log_two_pi = (2.0 * PI).ln();
 
         let difference = action - self.mean.clone();
-        (difference.powf_scalar(2.0) / variance + self.log_std.clone().mul_scalar(2.0))
+        (difference.clone() * difference / variance + self.log_std.clone().mul_scalar(2.0))
             .add_scalar(log_two_pi)
             .mul_scalar(-0.5)
             .sum_dim(1)
