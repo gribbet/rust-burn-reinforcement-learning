@@ -59,7 +59,6 @@ pub struct WalkerConfig {
     pub time_step: f32,
     pub friction: f32,
     pub torque_magnitude: f32,
-    pub iterations: usize,
     pub mass_density: f32,
     pub fall_y: f32,
 }
@@ -71,8 +70,7 @@ impl Default for WalkerConfig {
             morphology: Morphology::humanoid(),
             time_step: 0.02,
             friction: 1.0,
-            torque_magnitude: 40.0,
-            iterations: 1,
+            torque_magnitude: 20.0,
             mass_density: 5.0,
             fall_y: 0.75,
         }
@@ -320,10 +318,9 @@ impl<B: Backend> Walker<B> {
 
     pub fn step(&self, state: PhysicsState<B>, action: Tensor<B, 2>) -> PhysicsState<B> {
         let batch_size = state.positions.dims()[0];
-        let dt = self.config.time_step / self.config.iterations as f32;
 
-        let mut pos = state.positions;
-        let mut vel = state.velocities;
+        let mut positions = state.positions;
+        let mut velocities = state.velocities;
 
         let inv_masses_expanded = self
             .inv_masses
@@ -331,267 +328,249 @@ impl<B: Backend> Walker<B> {
             .reshape([1, self.n_particles, 1])
             .expand([batch_size, self.n_particles, 1]);
 
-        for _ in 0..self.config.iterations {
-            // 1. External Forces (Gravity)
-            // F = m * g
-            // a = g
-            let mut acc = Tensor::<B, 3>::zeros([batch_size, self.n_particles, 2], &pos.device());
-            let gravity_vec =
-                Tensor::<B, 1>::from_floats([0.0, -self.config.gravity], &pos.device())
-                    .reshape([1, 1, 2])
-                    .expand([batch_size, self.n_particles, 2]);
-            acc = acc + gravity_vec;
+        // 1. External Forces (Gravity)
+        // F = m * g
+        // a = g
+        let mut acc = Tensor::<B, 3>::zeros([batch_size, self.n_particles, 2], &positions.device());
+        let gravity_vec =
+            Tensor::<B, 1>::from_floats([0.0, -self.config.gravity], &positions.device())
+                .reshape([1, 1, 2])
+                .expand([batch_size, self.n_particles, 2]);
+        acc = acc + gravity_vec;
 
-            // 2. Actuation Forces (Vectorized)
-            let pos_p = pos.clone().select(1, self.joint_idx_p.clone()); // [B, n_joints, 2]
-            let pos_j = pos.clone().select(1, self.joint_idx_j.clone());
-            let pos_c = pos.clone().select(1, self.joint_idx_c.clone());
+        // 2. Actuation Forces (Vectorized)
+        let pos_p = positions.clone().select(1, self.joint_idx_p.clone()); // [B, n_joints, 2]
+        let pos_j = positions.clone().select(1, self.joint_idx_j.clone());
+        let pos_c = positions.clone().select(1, self.joint_idx_c.clone());
 
-            let r_parent = pos_j.clone() - pos_p.clone();
-            let r_child = pos_c.clone() - pos_j.clone();
+        let r_parent = pos_j.clone() - pos_p.clone();
+        let r_child = pos_c.clone() - pos_j.clone();
 
-            let r_parent_norm = r_parent.clone().powf_scalar(2.0).sum_dim(2).sqrt().clamp_min(1e-6);
-            let r_child_norm = r_child.clone().powf_scalar(2.0).sum_dim(2).sqrt().clamp_min(1e-6);
+        let r_parent_norm = r_parent.clone().powf_scalar(2.0).sum_dim(2).sqrt().clamp_min(1e-6);
+        let r_child_norm = r_child.clone().powf_scalar(2.0).sum_dim(2).sqrt().clamp_min(1e-6);
 
-            let u_parent = r_parent.clone() / r_parent_norm.clone();
-            let u_child = r_child.clone() / r_child_norm.clone();
+        let u_parent = r_parent.clone() / r_parent_norm.clone();
+        let u_child = r_child.clone() / r_child_norm.clone();
 
-            let n_joints = self.joint_pairs.len();
+        let n_joints = self.joint_pairs.len();
 
-            let perp_parent = Tensor::cat(
-                vec![
-                    u_parent.clone().slice([0..batch_size, 0..n_joints, 1..2]).neg(),
-                    u_parent.clone().slice([0..batch_size, 0..n_joints, 0..1]),
-                ],
-                2,
-            );
+        let perp_parent = Tensor::cat(
+            vec![
+                u_parent.clone().slice([0..batch_size, 0..n_joints, 1..2]).neg(),
+                u_parent.clone().slice([0..batch_size, 0..n_joints, 0..1]),
+            ],
+            2,
+        );
 
-            let perp_child = Tensor::cat(
-                vec![
-                    u_child.clone().slice([0..batch_size, 0..n_joints, 1..2]).neg(),
-                    u_child.clone().slice([0..batch_size, 0..n_joints, 0..1]),
-                ],
-                2,
-            );
+        let perp_child = Tensor::cat(
+            vec![
+                u_child.clone().slice([0..batch_size, 0..n_joints, 1..2]).neg(),
+                u_child.clone().slice([0..batch_size, 0..n_joints, 0..1]),
+            ],
+            2,
+        );
 
-            let torque = action.clone().unsqueeze_dim::<3>(2); // [B, n_joints, 1]
+        let torque = action.clone().unsqueeze_dim::<3>(2); // [B, n_joints, 1]
 
-            let f_parent_mag = torque.clone() / r_parent_norm * self.config.torque_magnitude;
-            let f_child_mag = torque.clone() / r_child_norm * self.config.torque_magnitude;
+        let f_parent_mag = torque.clone() / r_parent_norm * self.config.torque_magnitude;
+        let f_child_mag = torque.clone() / r_child_norm * self.config.torque_magnitude;
 
-            let f_child = perp_child * f_child_mag;
-            let f_parent = perp_parent * f_parent_mag;
-            let f_joint = (f_child.clone() + f_parent.clone()).neg();
+        let f_child = perp_child * f_child_mag;
+        let f_parent = perp_parent * f_parent_mag;
+        let f_joint = (f_child.clone() + f_parent.clone()).neg();
 
-            let map_p = self.joint_map_p.clone().unsqueeze::<3>().expand([
-                batch_size,
-                self.n_particles,
-                n_joints,
-            ]);
-            let map_j = self.joint_map_j.clone().unsqueeze::<3>().expand([
-                batch_size,
-                self.n_particles,
-                n_joints,
-            ]);
-            let map_c = self.joint_map_c.clone().unsqueeze::<3>().expand([
-                batch_size,
-                self.n_particles,
-                n_joints,
-            ]);
+        let map_p = self.joint_map_p.clone().unsqueeze::<3>().expand([
+            batch_size,
+            self.n_particles,
+            n_joints,
+        ]);
+        let map_j = self.joint_map_j.clone().unsqueeze::<3>().expand([
+            batch_size,
+            self.n_particles,
+            n_joints,
+        ]);
+        let map_c = self.joint_map_c.clone().unsqueeze::<3>().expand([
+            batch_size,
+            self.n_particles,
+            n_joints,
+        ]);
 
-            let actuation_forces =
-                map_p.matmul(f_parent) + map_j.matmul(f_joint) + map_c.matmul(f_child);
+        let actuation_forces =
+            map_p.matmul(f_parent) + map_j.matmul(f_joint) + map_c.matmul(f_child);
 
-            acc = acc + actuation_forces * inv_masses_expanded.clone();
+        acc = acc + actuation_forces * inv_masses_expanded.clone();
 
-            // 3. Integration (Semi-implicit Euler)
-            vel = vel + acc * dt;
-            let mut pred_pos = pos.clone() + vel.clone() * dt;
+        // 3. Integration (Semi-implicit Euler)
+        velocities = velocities + acc * self.config.time_step;
+        let mut predicted = positions.clone() + velocities.clone() * self.config.time_step;
 
-            // 4. Constraints (Distance + Angular)
-            for _ in 0..2 {
-                let x1 = pred_pos.clone().select(1, self.edge_idx_1.clone()); // [B, n_edges, 2]
-                let x2 = pred_pos.clone().select(1, self.edge_idx_2.clone());
+        // 4. Constraints (Distance + Angular)
+        let n_edges = self.edges.len();
+        let lengths = self.edge_lengths.clone().reshape([1, n_edges, 1]);
+        let w1 =
+            self.inv_masses.clone().select(0, self.edge_idx_1.clone()).reshape([1, n_edges, 1]);
+        let w2 =
+            self.inv_masses.clone().select(0, self.edge_idx_2.clone()).reshape([1, n_edges, 1]);
+        let w_sum = (w1.clone() + w2.clone()).clamp_min(1e-6);
 
-                let delta = x2.clone() - x1.clone();
-                let dist = delta.clone().powf_scalar(2.0).sum_dim(2).sqrt().clamp_min(1e-6);
+        let map_1 = self.edge_map_1.clone().unsqueeze::<3>().expand([
+            batch_size,
+            self.n_particles,
+            n_edges,
+        ]);
+        let map_2 = self.edge_map_2.clone().unsqueeze::<3>().expand([
+            batch_size,
+            self.n_particles,
+            n_edges,
+        ]);
 
-                let n_edges = self.edges.len();
-                let lengths = self.edge_lengths.clone().reshape([1, n_edges, 1]);
-                let diff = (dist.clone() - lengths) / dist;
+        let min_limit = self.joint_angle_min.clone().reshape([1, n_joints, 1]);
+        let max_limit = self.joint_angle_max.clone().reshape([1, n_joints, 1]);
 
-                let w1 = self
-                    .inv_masses
-                    .clone()
-                    .select(0, self.edge_idx_1.clone())
-                    .reshape([1, n_edges, 1]);
-                let w2 = self
-                    .inv_masses
-                    .clone()
-                    .select(0, self.edge_idx_2.clone())
-                    .reshape([1, n_edges, 1]);
-                let w_sum = (w1.clone() + w2.clone()).clamp_min(1e-6);
+        let w_p =
+            self.inv_masses.clone().select(0, self.joint_idx_p.clone()).reshape([1, n_joints, 1]);
+        let w_j =
+            self.inv_masses.clone().select(0, self.joint_idx_j.clone()).reshape([1, n_joints, 1]);
+        let w_c =
+            self.inv_masses.clone().select(0, self.joint_idx_c.clone()).reshape([1, n_joints, 1]);
 
-                let correction = delta * diff;
-                let c1 = correction.clone() * (w1 / w_sum.clone());
-                let c2 = correction * (w2 / w_sum);
+        let map_p = self.joint_map_p.clone().unsqueeze::<3>().expand([
+            batch_size,
+            self.n_particles,
+            n_joints,
+        ]);
+        let map_j = self.joint_map_j.clone().unsqueeze::<3>().expand([
+            batch_size,
+            self.n_particles,
+            n_joints,
+        ]);
+        let map_c = self.joint_map_c.clone().unsqueeze::<3>().expand([
+            batch_size,
+            self.n_particles,
+            n_joints,
+        ]);
 
-                let map_1 = self.edge_map_1.clone().unsqueeze::<3>().expand([
-                    batch_size,
-                    self.n_particles,
-                    n_edges,
-                ]);
-                let map_2 = self.edge_map_2.clone().unsqueeze::<3>().expand([
-                    batch_size,
-                    self.n_particles,
-                    n_edges,
-                ]);
+        let old_x = positions.clone().slice([0..batch_size, 0..self.n_particles, 0..1]);
 
-                let correction_total = map_1.matmul(c1) - map_2.matmul(c2);
-                pred_pos = pred_pos + correction_total;
+        for _ in 0..2 {
+            let x1 = predicted.clone().select(1, self.edge_idx_1.clone()); // [B, n_edges, 2]
+            let x2 = predicted.clone().select(1, self.edge_idx_2.clone());
 
-                // --- Angular Constraints (XPBD) ---
-                // Re-fetch positions after distance constraints
-                let pos_p = pred_pos.clone().select(1, self.joint_idx_p.clone());
-                let pos_j = pred_pos.clone().select(1, self.joint_idx_j.clone());
-                let pos_c = pred_pos.clone().select(1, self.joint_idx_c.clone());
+            let delta = x2.clone() - x1.clone();
+            let dist = delta.clone().powf_scalar(2.0).sum_dim(2).sqrt().clamp_min(1e-6);
 
-                // Vectors: u = J - P, v = C - J
-                let u = pos_j.clone() - pos_p.clone();
-                let v = pos_c.clone() - pos_j.clone();
+            let diff = (dist.clone() - lengths.clone()) / dist;
 
-                let u_len_sq = u.clone().powf_scalar(2.0).sum_dim(2).clamp_min(1e-6);
-                let v_len_sq = v.clone().powf_scalar(2.0).sum_dim(2).clamp_min(1e-6);
+            let correction = delta * diff;
+            let c1 = correction.clone() * (w1.clone() / w_sum.clone());
+            let c2 = correction * (w2.clone() / w_sum.clone());
 
-                // Normals (perpendiculars in 2D: -y, x)
-                let u_x = u.clone().slice([0..batch_size, 0..n_joints, 0..1]);
-                let u_y = u.clone().slice([0..batch_size, 0..n_joints, 1..2]);
-                let u_perp = Tensor::cat(vec![u_y.clone().neg(), u_x.clone()], 2);
+            let correction_total = map_1.clone().matmul(c1) - map_2.clone().matmul(c2);
+            predicted = predicted + correction_total;
 
-                let v_x = v.clone().slice([0..batch_size, 0..n_joints, 0..1]);
-                let v_y = v.clone().slice([0..batch_size, 0..n_joints, 1..2]);
-                let v_perp = Tensor::cat(vec![v_y.clone().neg(), v_x.clone()], 2);
+            // --- Angular Constraints (XPBD) ---
+            // Re-fetch positions after distance constraints
+            let pos_p = predicted.clone().select(1, self.joint_idx_p.clone());
+            let pos_j = predicted.clone().select(1, self.joint_idx_j.clone());
+            let pos_c = predicted.clone().select(1, self.joint_idx_c.clone());
 
-                // Calculate current angle
-                // Cross product (z): u_x * v_y - u_y * v_x
-                let cross = u_x.clone() * v_y.clone() - u_y.clone() * v_x.clone();
-                // Dot product: u . v
-                let dot = (u.clone() * v.clone()).sum_dim(2);
+            // Vectors: u = J - P, v = C - J
+            let u = pos_j.clone() - pos_p.clone();
+            let v = pos_c.clone() - pos_j.clone();
 
-                let angle = Self::approx_atan2(cross, dot);
+            let u_len_sq = u.clone().powf_scalar(2.0).sum_dim(2).clamp_min(1e-6);
+            let v_len_sq = v.clone().powf_scalar(2.0).sum_dim(2).clamp_min(1e-6);
 
-                // Limits
-                let min_limit = self.joint_angle_min.clone().reshape([1, n_joints, 1]);
-                let max_limit = self.joint_angle_max.clone().reshape([1, n_joints, 1]);
+            // Normals (perpendiculars in 2D: -y, x)
+            let u_x = u.clone().slice([0..batch_size, 0..n_joints, 0..1]);
+            let u_y = u.clone().slice([0..batch_size, 0..n_joints, 1..2]);
+            let u_perp = Tensor::cat(vec![u_y.clone().neg(), u_x.clone()], 2);
 
-                // Clamping
-                let clamped_angle =
-                    angle.clone().max_pair(min_limit.clone()).min_pair(max_limit.clone());
+            let v_x = v.clone().slice([0..batch_size, 0..n_joints, 0..1]);
+            let v_y = v.clone().slice([0..batch_size, 0..n_joints, 1..2]);
+            let v_perp = Tensor::cat(vec![v_y.clone().neg(), v_x.clone()], 2);
 
-                // C = angle - clamped_angle (We want C = 0)
-                let c_val = angle.clone() - clamped_angle;
+            // Calculate current angle
+            // Cross product (z): u_x * v_y - u_y * v_x
+            let cross = u_x.clone() * v_y.clone() - u_y.clone() * v_x.clone();
+            // Dot product: u . v
+            let dot = (u.clone() * v.clone()).sum_dim(2);
 
-                // Gradients
-                // grad_p = u_perp / u_len_sq
-                // grad_c = v_perp / v_len_sq
-                // grad_j = -(grad_p + grad_c)
+            let angle = Self::approx_atan2(cross, dot);
 
-                let grad_p = u_perp.clone() / u_len_sq.clone();
-                let grad_c = v_perp.clone() / v_len_sq.clone();
-                let grad_j = (grad_p.clone() + grad_c.clone()).neg();
+            // Clamping
+            let clamped_angle =
+                angle.clone().max_pair(min_limit.clone()).min_pair(max_limit.clone());
 
-                // Inverse masses
-                let w_p = self
-                    .inv_masses
-                    .clone()
-                    .select(0, self.joint_idx_p.clone())
-                    .reshape([1, n_joints, 1]);
-                let w_j = self
-                    .inv_masses
-                    .clone()
-                    .select(0, self.joint_idx_j.clone())
-                    .reshape([1, n_joints, 1]);
-                let w_c = self
-                    .inv_masses
-                    .clone()
-                    .select(0, self.joint_idx_c.clone())
-                    .reshape([1, n_joints, 1]);
+            // C = angle - clamped_angle (We want C = 0)
+            let c_val = angle.clone() - clamped_angle;
 
-                // Lambda denominator
-                // sum(w * |grad|^2)
-                let term_p = w_p.clone() * grad_p.clone().powf_scalar(2.0).sum_dim(2);
-                let term_c = w_c.clone() * grad_c.clone().powf_scalar(2.0).sum_dim(2);
-                let term_j = w_j.clone() * grad_j.clone().powf_scalar(2.0).sum_dim(2);
+            // Gradients
+            // grad_p = u_perp / u_len_sq
+            // grad_c = v_perp / v_len_sq
+            // grad_j = -(grad_p + grad_c)
 
-                // Compliance alpha (small value for stability)
-                let alpha = 1e-6;
-                let denom = term_p + term_c + term_j + alpha;
+            let grad_p = u_perp.clone() / u_len_sq.clone();
+            let grad_c = v_perp.clone() / v_len_sq.clone();
+            let grad_j = (grad_p.clone() + grad_c.clone()).neg();
 
-                // Lagrange multiplier
-                let delta_lambda = c_val.neg() / denom;
+            // Lambda denominator
+            // sum(w * |grad|^2)
+            let term_p = w_p.clone() * grad_p.clone().powf_scalar(2.0).sum_dim(2);
+            let term_c = w_c.clone() * grad_c.clone().powf_scalar(2.0).sum_dim(2);
+            let term_j = w_j.clone() * grad_j.clone().powf_scalar(2.0).sum_dim(2);
 
-                // Position corrections
-                let dp = grad_p * delta_lambda.clone() * w_p;
-                let dc = grad_c * delta_lambda.clone() * w_c;
-                let dj = grad_j * delta_lambda.clone() * w_j;
+            // Compliance alpha (small value for stability)
+            let alpha = 1e-6;
+            let denom = term_p + term_c + term_j + alpha;
 
-                // Scatter updates
-                let map_p = self.joint_map_p.clone().unsqueeze::<3>().expand([
-                    batch_size,
-                    self.n_particles,
-                    n_joints,
-                ]);
-                let map_j = self.joint_map_j.clone().unsqueeze::<3>().expand([
-                    batch_size,
-                    self.n_particles,
-                    n_joints,
-                ]);
-                let map_c = self.joint_map_c.clone().unsqueeze::<3>().expand([
-                    batch_size,
-                    self.n_particles,
-                    n_joints,
-                ]);
+            // Lagrange multiplier
+            let delta_lambda = c_val.neg() / denom;
 
-                let correction_total = map_p.matmul(dp) + map_j.matmul(dj) + map_c.matmul(dc);
+            // Position corrections
+            let dp = grad_p * delta_lambda.clone() * w_p.clone();
+            let dc = grad_c * delta_lambda.clone() * w_c.clone();
+            let dj = grad_j * delta_lambda.clone() * w_j.clone();
 
-                pred_pos = pred_pos + correction_total;
+            let correction_total =
+                map_p.clone().matmul(dp) + map_j.clone().matmul(dj) + map_c.clone().matmul(dc);
 
-                // --- Ground Collision ---
-                // y < 0 -> y = 0
-                let y = pred_pos.clone().slice([0..batch_size, 0..self.n_particles, 1..2]);
-                let penetration = y.clone().neg().clamp_min(0.0);
+            predicted = predicted + correction_total;
 
-                // Project out of ground
-                let correction_y = penetration.clone();
+            // --- Ground Collision ---
+            // y < 0 -> y = 0
+            let y = predicted.clone().slice([0..batch_size, 0..self.n_particles, 1..2]);
+            let penetration = y.clone().neg().clamp_min(0.0);
 
-                // PBD Friction
-                // Apply tangential correction opposite to movement, limited by normal impulse * friction
-                let current_x = pred_pos.clone().slice([0..batch_size, 0..self.n_particles, 0..1]);
-                let old_x = pos.clone().slice([0..batch_size, 0..self.n_particles, 0..1]);
-                let diff_x = current_x - old_x;
+            // Project out of ground
+            let correction_y = penetration.clone();
 
-                // Normal impulse is proportional to correction_y
-                let max_friction = correction_y.clone() * self.config.friction;
+            // PBD Friction
+            // Apply tangential correction opposite to movement, limited by normal impulse * friction
+            let current_x = predicted.clone().slice([0..batch_size, 0..self.n_particles, 0..1]);
+            let diff_x = current_x - old_x.clone();
 
-                // Clamp correction_x to [-max, max]
-                // We want correction_x = -diff_x, clamped.
-                let correction_x =
-                    diff_x.neg().max_pair(max_friction.clone().neg()).min_pair(max_friction);
+            // Normal impulse is proportional to correction_y
+            let max_friction = correction_y.clone() * self.config.friction;
 
-                let correction_vec = Tensor::cat(vec![correction_x, correction_y.clone()], 2);
+            // Clamp correction_x to [-max, max]
+            // We want correction_x = -diff_x, clamped.
+            let correction_x =
+                diff_x.neg().max_pair(max_friction.clone().neg()).min_pair(max_friction);
 
-                pred_pos = pred_pos + correction_vec;
-            }
+            let correction_vec = Tensor::cat(vec![correction_x, correction_y.clone()], 2);
 
-            // Update velocity based on position change (PBD velocity update)
-            // v = (p_new - p_old) / dt
-            vel = (pred_pos.clone() - pos) / dt;
-            pos = pred_pos;
+            predicted = predicted + correction_vec;
         }
 
+        // Update velocity based on position change (PBD velocity update)
+        // v = (p_new - p_old) / dt
+        velocities = (predicted.clone() - positions) / self.config.time_step;
+        positions = predicted;
+
         PhysicsState {
-            positions: pos,
-            velocities: vel,
+            positions,
+            velocities,
             time: state.time + self.config.time_step,
             target_velocity: state.target_velocity,
         }
