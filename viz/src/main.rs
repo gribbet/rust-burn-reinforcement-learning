@@ -3,7 +3,7 @@ use burn::prelude::*;
 use burn::record::{BinFileRecorder, FullPrecisionSettings};
 use macroquad::prelude::*;
 use shared::model::ActorCritic;
-use shared::physics::{PhysicsState, Segment, Walker, WalkerConfig};
+use shared::physics::{PhysicsState, Walker, WalkerConfig};
 
 fn window_conf() -> Conf {
     Conf {
@@ -42,15 +42,14 @@ async fn main() {
     loop {
         clear_background(WHITE);
 
-        let target_vel = 1.0;
-
-        state.target_velocity = Tensor::from_floats([target_vel], &device);
+        state.target_velocity = Tensor::from_floats([1.0], &device);
 
         let action = if model_loaded {
             let obs = walker.get_observation(&state);
             let (mean, _, _) = model.forward(obs);
             mean.tanh()
         } else {
+            // Zero action to verify physics stability
             Tensor::zeros([1, action_dim], &device)
         };
 
@@ -63,13 +62,14 @@ async fn main() {
 }
 
 fn draw_simulation<B: Backend>(state: &PhysicsState<B>, walker: &Walker<B>) {
-    let kin = walker.calculate_kinematics(state);
+    let positions = state.positions.clone().to_data();
+    // positions is [batch, n_particles, 2]
+    // We assume batch_size = 1 for viz
+    let pos_slice = positions.as_slice::<f32>().unwrap();
+    // Layout: [p0_x, p0_y, p1_x, p1_y, ...]
 
-    let root_x = kin.root_x.to_data().as_slice::<f32>().unwrap()[0];
-    let root_y = kin.root_y.to_data().as_slice::<f32>().unwrap()[0];
-
-    let end_x: Vec<f32> = kin.end_x.to_data().as_slice::<f32>().unwrap().to_vec();
-    let end_y: Vec<f32> = kin.end_y.to_data().as_slice::<f32>().unwrap().to_vec();
+    let n_particles = walker.n_particles;
+    let get_pos = |i: usize| (pos_slice[i * 2], pos_slice[i * 2 + 1]);
 
     let screen_w = screen_width();
     let screen_h = screen_height();
@@ -81,46 +81,31 @@ fn draw_simulation<B: Backend>(state: &PhysicsState<B>, walker: &Walker<B>) {
     // Ground
     draw_line(0.0, ground_y, screen_w, ground_y, 2.0, BLACK);
 
-    // Helper to get parent index
-    let mut flat_with_parents = Vec::new();
-    struct InternalSegment {
-        parent_idx: Option<usize>,
-    }
-    fn flatten_with_parents(s: &Segment, p: Option<usize>, list: &mut Vec<InternalSegment>) {
-        let idx = list.len();
-        list.push(InternalSegment { parent_idx: p });
-        for child in &s.children {
-            flatten_with_parents(child, Some(idx), list);
-        }
-    }
-    flatten_with_parents(&walker.config.morphology.root, None, &mut flat_with_parents);
+    // Draw edges
+    for &(p1, p2, _) in &walker.edges {
+        let (x1, y1) = get_pos(p1);
+        let (x2, y2) = get_pos(p2);
 
-    for i in 0..flat_with_parents.len() {
-        let (px, py) = match flat_with_parents[i].parent_idx {
-            Some(p_idx) => (end_x[p_idx], end_y[p_idx]),
-            None => (root_x, root_y),
-        };
-        let ex = end_x[i];
-        let ey = end_y[i];
+        let s_x1 = draw_x_offset + x1 * scale;
+        let s_y1 = ground_y - y1 * scale;
+        let s_x2 = draw_x_offset + x2 * scale;
+        let s_y2 = ground_y - y2 * scale;
 
-        let s_px = draw_x_offset + px * scale;
-        let s_py = ground_y - py * scale;
-        let s_ex = draw_x_offset + ex * scale;
-        let s_ey = ground_y - ey * scale;
-
-        draw_line(s_px, s_py, s_ex, s_ey, 4.0, BLACK);
-        draw_circle(s_ex, s_ey, 3.0, RED);
+        draw_line(s_x1, s_y1, s_x2, s_y2, 4.0, BLACK);
     }
 
-    // Draw CoM
-    let com_x = state.x.clone().to_data().as_slice::<f32>().unwrap()[0];
-    let com_y = state.y.clone().to_data().as_slice::<f32>().unwrap()[0];
-    let s_com_x = draw_x_offset + com_x * scale;
-    let s_com_y = ground_y - com_y * scale;
-    draw_circle(s_com_x, s_com_y, 5.0, BLUE);
+    // Draw particles
+    for i in 0..n_particles {
+        let (x, y) = get_pos(i);
+        let s_x = draw_x_offset + x * scale;
+        let s_y = ground_y - y * scale;
+        draw_circle(s_x, s_y, 5.0, RED);
+    }
 
-    draw_text(&format!("X: {:.2}", com_x), 20.0, 20.0, 20.0, BLACK);
-    if com_y < 0.4 {
+    // Draw Info
+    let (root_x, root_y) = get_pos(0);
+    draw_text(&format!("X: {:.2}", root_x), 20.0, 20.0, 20.0, BLACK);
+    if root_y < 0.4 {
         draw_text("FALLEN", 20.0, 50.0, 30.0, RED);
     }
 }
