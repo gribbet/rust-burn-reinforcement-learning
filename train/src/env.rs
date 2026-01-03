@@ -90,33 +90,25 @@ impl<B: Backend> TrainingEnv<B> {
         // Done conditions
         // Root is particle 0. Y is index 1.
         let batch_size = next_state.positions.dims()[0];
-        let root_y = next_state
-            .positions
-            .clone()
-            .slice([0..batch_size, 0..1, 1..2])
-            .squeeze_dim::<2>(2)
-            .squeeze_dim::<1>(1);
-        let is_fallen = root_y.clone().lower_equal_elem(self.walker.config.fall_y);
+        let root_pos_next =
+            next_state.positions.clone().slice([0..batch_size, 0..1, 0..2]).squeeze_dim::<2>(1);
+        let root_y = root_pos_next.clone().slice([0..batch_size, 1..2]).squeeze_dim::<1>(1);
+        let is_fallen = root_y.lower_equal_elem(self.walker.config.fall_y);
 
         // Reward function
-        let root_x_next = next_state
-            .positions
-            .clone()
-            .slice([0..batch_size, 0..1, 0..1])
-            .squeeze_dim::<2>(2)
-            .squeeze_dim::<1>(1);
+        let root_x_next = root_pos_next.slice([0..batch_size, 0..1]).squeeze_dim::<1>(1);
         let root_x_prev = state
             .positions
             .clone()
             .slice([0..batch_size, 0..1, 0..1])
-            .squeeze_dim::<2>(2)
+            .squeeze_dim::<2>(1)
             .squeeze_dim::<1>(1);
 
         let distance = root_x_next - root_x_prev;
         let progress = (distance.clone() * state.target_velocity.clone()) * 100.0; // Reward based on target direction
         let progress = progress.mask_where(is_fallen.clone(), Tensor::zeros_like(&distance));
 
-        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim(1) * -1.0; // Efficiency penalty
+        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.1; // Efficiency penalty
 
         let survival = (Tensor::ones_like(&progress) * 1.0)
             .mask_where(is_fallen.clone(), Tensor::ones_like(&progress) * -100.0);

@@ -28,10 +28,7 @@ pub fn approx_atan<B: Backend>(z: Tensor<B, 3>) -> Tensor<B, 3> {
     let res = approx_atan_core(z_core);
 
     let pi_2 = std::f32::consts::PI / 2.0;
-    let sign = z
-        .clone()
-        .mask_fill(z.clone().lower_elem(0.0), -1.0)
-        .mask_fill(z.clone().greater_elem(0.0), 1.0);
+    let sign = z.clone().sign();
 
     let res_inv = sign * pi_2 - res.clone();
 
@@ -49,29 +46,17 @@ pub fn approx_atan2<B: Backend>(y: Tensor<B, 3>, x: Tensor<B, 3>) -> Tensor<B, 3
     let pi_2 = pi / 2.0;
 
     let x_neg = x.clone().lower_elem(0.0);
-    let y_neg = y.clone().lower_elem(0.0);
 
-    let mut res = atan_z;
+    // Standard atan2 logic:
+    // x > 0: atan(y/x)
+    // x < 0: atan(y/x) + sign(y) * pi
+    // x = 0: sign(y) * pi/2
 
-    // Add PI where x < 0
-    let res_plus_pi = res.clone() + pi;
-    res = res.mask_where(x_neg.clone(), res_plus_pi);
+    let y_sign = y.clone().sign();
+    let offset = y_sign.clone() * pi;
+    let mut res = atan_z.clone().mask_where(x_neg, atan_z + offset);
 
-    // If y < 0 and we added PI (meaning x < 0), we are at > PI/2.
-    // We want -PI relative to the original, or subtract 2PI from current.
-    // If x < 0, y < 0 -> atan(z) > 0. res = atan(z) + PI > PI.
-    // We want atan(z) - PI.
-    // So subtract 2PI.
-
-    let res_y_neg = res.clone().mask_where(res.clone().greater_elem(pi_2), res.clone() - 2.0 * pi);
-
-    res = res.mask_where(y_neg, res_y_neg);
-
-    // Handle x = 0
-    let res_x_zero = Tensor::zeros_like(&res)
-        .mask_fill(y.clone().greater_elem(0.0), pi_2)
-        .mask_fill(y.clone().lower_elem(0.0), -pi_2);
-
+    let res_x_zero = y_sign * pi_2;
     res = res.mask_where(x_zero, res_x_zero);
 
     res

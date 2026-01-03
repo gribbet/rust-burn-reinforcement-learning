@@ -102,6 +102,12 @@ pub struct Walker<B: Backend> {
     pub joint_map_j: Tensor<B, 2>,
     pub joint_map_c: Tensor<B, 2>,
 
+    pub joint_map_p_3d: Tensor<B, 3>,
+    pub joint_map_j_3d: Tensor<B, 3>,
+    pub joint_map_c_3d: Tensor<B, 3>,
+    pub edge_map_1_3d: Tensor<B, 3>,
+    pub edge_map_2_3d: Tensor<B, 3>,
+
     pub joint_angle_min: Tensor<B, 1>,
     pub joint_angle_max: Tensor<B, 1>,
 
@@ -116,6 +122,22 @@ pub struct Walker<B: Backend> {
     pub init_angle_min: Vec<f32>,
     pub init_angle_max: Vec<f32>,
     pub init_parent_edge: Vec<Option<usize>>,
+
+    pub init_eff_min: Tensor<B, 1>,
+    pub init_eff_max: Tensor<B, 1>,
+    pub init_lengths_tensor: Tensor<B, 1>,
+
+    pub gravity_vec: Tensor<B, 3>,
+    pub inv_masses_reshaped: Tensor<B, 3>,
+    pub edge_lengths_reshaped: Tensor<B, 3>,
+    pub edge_w1: Tensor<B, 3>,
+    pub edge_w2: Tensor<B, 3>,
+    pub edge_w_sum: Tensor<B, 3>,
+    pub joint_min_limit: Tensor<B, 3>,
+    pub joint_max_limit: Tensor<B, 3>,
+    pub joint_w_p: Tensor<B, 3>,
+    pub joint_w_j: Tensor<B, 3>,
+    pub joint_w_c: Tensor<B, 3>,
 
     _marker: std::marker::PhantomData<B>,
 }
@@ -227,10 +249,46 @@ impl<B: Backend> Walker<B> {
         let joint_map_c = Tensor::<B, 1>::from_floats(joint_map_c_data.as_slice(), device)
             .reshape([n_particles, n_joints]);
 
+        let joint_map_p_3d = joint_map_p.clone().unsqueeze::<3>();
+        let joint_map_j_3d = joint_map_j.clone().unsqueeze::<3>();
+        let joint_map_c_3d = joint_map_c.clone().unsqueeze::<3>();
+        let edge_map_1_3d = edge_map_1.clone().unsqueeze::<3>();
+        let edge_map_2_3d = edge_map_2.clone().unsqueeze::<3>();
+
         let joint_angle_min_vec: Vec<f32> = joint_limits.iter().map(|l| l.0).collect();
         let joint_angle_max_vec: Vec<f32> = joint_limits.iter().map(|l| l.1).collect();
         let joint_angle_min = Tensor::from_floats(joint_angle_min_vec.as_slice(), device);
         let joint_angle_max = Tensor::from_floats(joint_angle_max_vec.as_slice(), device);
+
+        let mut init_eff_min_vec = Vec::new();
+        let mut init_eff_max_vec = Vec::new();
+        for i in 0..init_p1.len() {
+            let angle_min = init_angle_min[i];
+            let angle_max = init_angle_max[i];
+            let parent_edge_idx = init_parent_edge[i];
+
+            let (eff_min, eff_max) =
+                if parent_edge_idx.is_none() { (-0.1, 0.1) } else { (angle_min, angle_max) };
+            init_eff_min_vec.push(eff_min);
+            init_eff_max_vec.push(eff_max);
+        }
+        let init_eff_min = Tensor::from_floats(init_eff_min_vec.as_slice(), device);
+        let init_eff_max = Tensor::from_floats(init_eff_max_vec.as_slice(), device);
+        let init_lengths_tensor = Tensor::from_floats(init_lengths.as_slice(), device);
+
+        let gravity_vec =
+            Tensor::<B, 1>::from_floats([0.0, -config.gravity], device).reshape([1, 1, 2]);
+        let inv_masses_reshaped = inv_masses.clone().reshape([1, n_particles, 1]);
+        let edge_lengths_reshaped = edge_lengths.clone().reshape([1, n_edges, 1]);
+        let edge_w1 = inv_masses.clone().select(0, edge_idx_1.clone()).reshape([1, n_edges, 1]);
+        let edge_w2 = inv_masses.clone().select(0, edge_idx_2.clone()).reshape([1, n_edges, 1]);
+        let edge_w_sum = (edge_w1.clone() + edge_w2.clone()).clamp_min(1e-6);
+
+        let joint_min_limit = joint_angle_min.clone().reshape([1, n_joints, 1]);
+        let joint_max_limit = joint_angle_max.clone().reshape([1, n_joints, 1]);
+        let joint_w_p = inv_masses.clone().select(0, joint_idx_p.clone()).reshape([1, n_joints, 1]);
+        let joint_w_j = inv_masses.clone().select(0, joint_idx_j.clone()).reshape([1, n_joints, 1]);
+        let joint_w_c = inv_masses.clone().select(0, joint_idx_c.clone()).reshape([1, n_joints, 1]);
 
         Self {
             config,
@@ -247,6 +305,11 @@ impl<B: Backend> Walker<B> {
             joint_map_p,
             joint_map_j,
             joint_map_c,
+            joint_map_p_3d,
+            joint_map_j_3d,
+            joint_map_c_3d,
+            edge_map_1_3d,
+            edge_map_2_3d,
             joint_angle_min,
             joint_angle_max,
             masses,
@@ -258,6 +321,20 @@ impl<B: Backend> Walker<B> {
             init_angle_min,
             init_angle_max,
             init_parent_edge,
+            init_eff_min,
+            init_eff_max,
+            init_lengths_tensor,
+            gravity_vec,
+            inv_masses_reshaped,
+            edge_lengths_reshaped,
+            edge_w1,
+            edge_w2,
+            edge_w_sum,
+            joint_min_limit,
+            joint_max_limit,
+            joint_w_p,
+            joint_w_j,
+            joint_w_c,
             _marker: std::marker::PhantomData,
         }
     }
@@ -275,42 +352,40 @@ impl<B: Backend> Walker<B> {
             .expand([batch_size, 1, 2]);
         positions = positions.slice_assign([0..batch_size, 0..1, 0..2], root_start);
 
-        let mut edge_angles: Vec<Tensor<B, 1>> = Vec::with_capacity(self.init_p1.len());
+        let n_edges = self.init_p1.len();
+        let random_vals = Tensor::<B, 2>::random(
+            [n_edges, batch_size],
+            burn::tensor::Distribution::Default,
+            device,
+        );
+        let eff_min = self.init_eff_min.clone().reshape([n_edges, 1]);
+        let eff_max = self.init_eff_max.clone().reshape([n_edges, 1]);
+        let all_angle_offsets = random_vals * (eff_max - eff_min.clone()) + eff_min;
 
-        for i in 0..self.init_p1.len() {
+        let root_base_angle =
+            Tensor::<B, 1>::from_floats([-std::f32::consts::PI / 2.0], device).expand([batch_size]);
+
+        let mut edge_angles: Vec<Tensor<B, 1>> = Vec::with_capacity(n_edges);
+
+        for i in 0..n_edges {
             let p1 = self.init_p1[i];
             let p2 = self.init_p2[i];
-            let length = self.init_lengths[i];
-            let angle_min = self.init_angle_min[i];
-            let angle_max = self.init_angle_max[i];
+            let length = self.init_lengths_tensor.clone().slice([i..i + 1]).reshape([1, 1]);
             let parent_edge_idx = self.init_parent_edge[i];
-
-            let (eff_min, eff_max) =
-                if parent_edge_idx.is_none() { (-0.1, 0.1) } else { (angle_min, angle_max) };
 
             let base_angle = if let Some(idx) = parent_edge_idx {
                 edge_angles[idx].clone()
             } else {
-                Tensor::<B, 1>::from_floats([-std::f32::consts::PI / 2.0], device)
-                    .expand([batch_size])
+                root_base_angle.clone()
             };
 
-            let angle_offset = if (eff_max - eff_min).abs() < 1e-6 {
-                Tensor::zeros([batch_size], device)
-            } else {
-                Tensor::random(
-                    [batch_size],
-                    burn::tensor::Distribution::Uniform(eff_min as f64, eff_max as f64),
-                    device,
-                )
-            };
-
+            let angle_offset = all_angle_offsets.clone().slice([i..i + 1]).squeeze_dim(0);
             let angle = base_angle + angle_offset;
             edge_angles.push(angle.clone());
 
             let cos_angle = angle.clone().cos().reshape([batch_size, 1]);
             let sin_angle = angle.sin().reshape([batch_size, 1]);
-            let delta = Tensor::cat(vec![cos_angle * length, sin_angle * length], 1)
+            let delta = Tensor::cat(vec![cos_angle * length.clone(), sin_angle * length], 1)
                 .reshape([batch_size, 1, 2]);
 
             let p1_pos = positions.clone().slice([0..batch_size, p1..p1 + 1, 0..2]);
@@ -328,16 +403,8 @@ impl<B: Backend> Walker<B> {
     pub fn get_observation(&self, state: &PhysicsState<B>) -> Tensor<B, 2> {
         let batch_size = state.positions.dims()[0];
 
-        // Observation:
-        // Root y, vx, vy
-        // For each joint: relative angle, angular velocity?
-        // Or just positions and velocities of all particles relative to root?
-
-        // Let's return relative positions and velocities to make it general.
-        // Relative to root start (particle 0).
-
-        let root_pos = state.positions.clone().slice([0..batch_size, 0..1, 0..2]); // [B, 1, 2]
-        let rel_pos = state.positions.clone() - root_pos; // [B, N, 2]
+        let root_pos = state.positions.clone().slice([0..batch_size, 0..1, 0..2]);
+        let rel_pos = state.positions.clone() - root_pos;
 
         let flat_pos = rel_pos.reshape([batch_size, self.n_particles * 2]);
         let flat_vel = state.velocities.clone().reshape([batch_size, self.n_particles * 2]);
@@ -351,21 +418,10 @@ impl<B: Backend> Walker<B> {
         let mut positions = state.positions;
         let mut velocities = state.velocities;
 
-        let inv_masses_expanded = self
-            .inv_masses
-            .clone()
-            .reshape([1, self.n_particles, 1])
-            .expand([batch_size, self.n_particles, 1]);
-
         // 1. External Forces (Gravity)
         // F = m * g
         // a = g
-        let mut acc = Tensor::<B, 3>::zeros([batch_size, self.n_particles, 2], &positions.device());
-        let gravity_vec =
-            Tensor::<B, 1>::from_floats([0.0, -self.config.gravity], &positions.device())
-                .reshape([1, 1, 2])
-                .expand([batch_size, self.n_particles, 2]);
-        acc = acc + gravity_vec;
+        let mut acc = self.gravity_vec.clone().expand([batch_size, self.n_particles, 2]);
 
         // 2. Actuation Forces (Vectorized)
         let pos_p = positions.clone().select(1, self.joint_idx_p.clone()); // [B, n_joints, 2]
@@ -408,77 +464,17 @@ impl<B: Backend> Walker<B> {
         let f_parent = perp_parent * f_parent_mag;
         let f_joint = (f_child.clone() + f_parent.clone()).neg();
 
-        let map_p = self.joint_map_p.clone().unsqueeze::<3>().expand([
-            batch_size,
-            self.n_particles,
-            n_joints,
-        ]);
-        let map_j = self.joint_map_j.clone().unsqueeze::<3>().expand([
-            batch_size,
-            self.n_particles,
-            n_joints,
-        ]);
-        let map_c = self.joint_map_c.clone().unsqueeze::<3>().expand([
-            batch_size,
-            self.n_particles,
-            n_joints,
-        ]);
+        let actuation_forces = self.joint_map_p_3d.clone().matmul(f_parent)
+            + self.joint_map_j_3d.clone().matmul(f_joint)
+            + self.joint_map_c_3d.clone().matmul(f_child);
 
-        let actuation_forces =
-            map_p.matmul(f_parent) + map_j.matmul(f_joint) + map_c.matmul(f_child);
-
-        acc = acc + actuation_forces * inv_masses_expanded.clone();
+        acc = acc + actuation_forces * self.inv_masses_reshaped.clone();
 
         // 3. Integration (Semi-implicit Euler)
         velocities = velocities + acc * self.config.time_step;
         let mut predicted = positions.clone() + velocities.clone() * self.config.time_step;
 
         // 4. Constraints (Distance + Angular)
-        let n_edges = self.edges.len();
-        let lengths = self.edge_lengths.clone().reshape([1, n_edges, 1]);
-        let w1 =
-            self.inv_masses.clone().select(0, self.edge_idx_1.clone()).reshape([1, n_edges, 1]);
-        let w2 =
-            self.inv_masses.clone().select(0, self.edge_idx_2.clone()).reshape([1, n_edges, 1]);
-        let w_sum = (w1.clone() + w2.clone()).clamp_min(1e-6);
-
-        let map_1 = self.edge_map_1.clone().unsqueeze::<3>().expand([
-            batch_size,
-            self.n_particles,
-            n_edges,
-        ]);
-        let map_2 = self.edge_map_2.clone().unsqueeze::<3>().expand([
-            batch_size,
-            self.n_particles,
-            n_edges,
-        ]);
-
-        let min_limit = self.joint_angle_min.clone().reshape([1, n_joints, 1]);
-        let max_limit = self.joint_angle_max.clone().reshape([1, n_joints, 1]);
-
-        let w_p =
-            self.inv_masses.clone().select(0, self.joint_idx_p.clone()).reshape([1, n_joints, 1]);
-        let w_j =
-            self.inv_masses.clone().select(0, self.joint_idx_j.clone()).reshape([1, n_joints, 1]);
-        let w_c =
-            self.inv_masses.clone().select(0, self.joint_idx_c.clone()).reshape([1, n_joints, 1]);
-
-        let map_p = self.joint_map_p.clone().unsqueeze::<3>().expand([
-            batch_size,
-            self.n_particles,
-            n_joints,
-        ]);
-        let map_j = self.joint_map_j.clone().unsqueeze::<3>().expand([
-            batch_size,
-            self.n_particles,
-            n_joints,
-        ]);
-        let map_c = self.joint_map_c.clone().unsqueeze::<3>().expand([
-            batch_size,
-            self.n_particles,
-            n_joints,
-        ]);
-
         let old_x = positions.clone().slice([0..batch_size, 0..self.n_particles, 0..1]);
 
         for _ in 0..2 {
@@ -488,13 +484,14 @@ impl<B: Backend> Walker<B> {
             let delta = x2.clone() - x1.clone();
             let dist = delta.clone().powf_scalar(2.0).sum_dim(2).sqrt().clamp_min(1e-6);
 
-            let diff = (dist.clone() - lengths.clone()) / dist;
+            let diff = (dist.clone() - self.edge_lengths_reshaped.clone()) / dist;
 
             let correction = delta * diff;
-            let c1 = correction.clone() * (w1.clone() / w_sum.clone());
-            let c2 = correction * (w2.clone() / w_sum.clone());
+            let c1 = correction.clone() * (self.edge_w1.clone() / self.edge_w_sum.clone());
+            let c2 = correction * (self.edge_w2.clone() / self.edge_w_sum.clone());
 
-            let correction_total = map_1.clone().matmul(c1) - map_2.clone().matmul(c2);
+            let correction_total =
+                self.edge_map_1_3d.clone().matmul(c1) - self.edge_map_2_3d.clone().matmul(c2);
             predicted = predicted + correction_total;
 
             // --- Angular Constraints (XPBD) ---
@@ -528,8 +525,10 @@ impl<B: Backend> Walker<B> {
             let angle = crate::math::approx_atan2(cross, dot);
 
             // Clamping
-            let clamped_angle =
-                angle.clone().max_pair(min_limit.clone()).min_pair(max_limit.clone());
+            let clamped_angle = angle
+                .clone()
+                .max_pair(self.joint_min_limit.clone())
+                .min_pair(self.joint_max_limit.clone());
 
             // C = angle - clamped_angle (We want C = 0)
             let c_val = angle.clone() - clamped_angle;
@@ -545,9 +544,9 @@ impl<B: Backend> Walker<B> {
 
             // Lambda denominator
             // sum(w * |grad|^2)
-            let term_p = w_p.clone() * grad_p.clone().powf_scalar(2.0).sum_dim(2);
-            let term_c = w_c.clone() * grad_c.clone().powf_scalar(2.0).sum_dim(2);
-            let term_j = w_j.clone() * grad_j.clone().powf_scalar(2.0).sum_dim(2);
+            let term_p = self.joint_w_p.clone() * grad_p.clone().powf_scalar(2.0).sum_dim(2);
+            let term_c = self.joint_w_c.clone() * grad_c.clone().powf_scalar(2.0).sum_dim(2);
+            let term_j = self.joint_w_j.clone() * grad_j.clone().powf_scalar(2.0).sum_dim(2);
 
             // Compliance alpha (small value for stability)
             let alpha = 1e-6;
@@ -557,12 +556,13 @@ impl<B: Backend> Walker<B> {
             let delta_lambda = c_val.neg() / denom;
 
             // Position corrections
-            let dp = grad_p * delta_lambda.clone() * w_p.clone();
-            let dc = grad_c * delta_lambda.clone() * w_c.clone();
-            let dj = grad_j * delta_lambda.clone() * w_j.clone();
+            let dp = grad_p * delta_lambda.clone() * self.joint_w_p.clone();
+            let dc = grad_c * delta_lambda.clone() * self.joint_w_c.clone();
+            let dj = grad_j * delta_lambda.clone() * self.joint_w_j.clone();
 
-            let correction_total =
-                map_p.clone().matmul(dp) + map_j.clone().matmul(dj) + map_c.clone().matmul(dc);
+            let correction_total = self.joint_map_p_3d.clone().matmul(dp)
+                + self.joint_map_j_3d.clone().matmul(dj)
+                + self.joint_map_c_3d.clone().matmul(dc);
 
             predicted = predicted + correction_total;
 

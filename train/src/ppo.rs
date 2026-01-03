@@ -326,15 +326,20 @@ fn collect_rollout<B: AutodiffBackend>(
     let all_rewards = Tensor::cat(rollout.cumulative_rewards.clone(), 0);
     let all_is_fallens = Tensor::cat(rollout.is_fallens.clone(), 0);
 
-    let total_episodes = all_dones.clone().sum().into_data().as_slice::<i64>().unwrap()[0] as usize;
+    let total_episodes_t = all_dones.clone().sum().float().reshape([1]);
+    let total_fallen_t = (all_dones.clone() * all_is_fallens).sum().float().reshape([1]);
+    let total_reward_t = (all_dones.float() * all_rewards).sum().reshape([1]);
+
+    let metrics =
+        Tensor::cat(vec![total_episodes_t, total_fallen_t, total_reward_t], 0).into_data();
+    let metrics_slice = metrics.as_slice::<f32>().unwrap();
+
+    let total_episodes = metrics_slice[0] as usize;
 
     if total_episodes > 0 {
-        let dones_float = all_dones.clone().float();
         rollout.total_episodes = total_episodes;
-        rollout.total_fallen =
-            (all_dones * all_is_fallens).sum().into_data().as_slice::<i64>().unwrap()[0] as usize;
-        rollout.total_reward =
-            (dones_float * all_rewards).sum().into_data().as_slice::<f32>().unwrap()[0];
+        rollout.total_fallen = metrics_slice[1] as usize;
+        rollout.total_reward = metrics_slice[2];
     }
 
     *observation_outer = Tensor::from_inner(observation.clone());
@@ -413,9 +418,14 @@ fn compute_generalized_advantage_estimation<B: Backend>(
         Tensor::<B, 1>::zeros(next_value.dims(), &next_value.device());
     let mut current_next_value = next_value;
 
+    let environments_count = current_next_value.dims()[0];
+    let all_dones = Tensor::cat(dones.to_vec(), 0);
+    let all_done_masks = all_dones.float().equal_elem(0.0).float();
+    let done_masks = all_done_masks.reshape([rollout_length, environments_count]);
+
     for time_step in (0..rollout_length).rev() {
         let reward = rewards[time_step].clone();
-        let done_mask = dones[time_step].clone().float().equal_elem(0.0).float();
+        let done_mask = done_masks.clone().slice([time_step..time_step + 1]).squeeze_dim::<1>(0);
         let value = values[time_step].clone();
 
         let temporal_difference_error =
