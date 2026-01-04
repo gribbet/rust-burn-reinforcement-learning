@@ -92,7 +92,7 @@ pub struct WalkerConfig {
     pub torque_magnitude: f32,
     pub mass_density: f32,
     pub fall_y: f32,
-    pub num_iterations: usize,
+    pub constraint_iterations: usize,
 }
 
 impl Default for WalkerConfig {
@@ -105,7 +105,7 @@ impl Default for WalkerConfig {
             torque_magnitude: 40.0,
             mass_density: 5.0,
             fall_y: 0.75,
-            num_iterations: 2,
+            constraint_iterations: 2,
         }
     }
 }
@@ -116,6 +116,7 @@ pub struct PhysicsState<B: Backend> {
     pub velocities: Tensor<B, 3>, // [batch, n_particles, 2]
     pub time: Tensor<B, 1>,
     pub target_velocity: Tensor<B, 1>,
+    pub fallen_time: Tensor<B, 1>,
 }
 
 pub struct Walker<B: Backend> {
@@ -459,8 +460,9 @@ impl<B: Backend> Walker<B> {
         let velocities = Tensor::zeros([batch_size, self.n_particles, 2], device);
         let time = Tensor::zeros([batch_size], device);
         let target_velocity = Tensor::zeros([batch_size], device);
+        let fallen_time = Tensor::zeros([batch_size], device);
 
-        PhysicsState { positions, velocities, time, target_velocity }
+        PhysicsState { positions, velocities, time, target_velocity, fallen_time }
     }
 
     pub fn get_observation(&self, state: &PhysicsState<B>) -> Tensor<B, 2> {
@@ -540,7 +542,7 @@ impl<B: Backend> Walker<B> {
         // 4. Constraints (Distance + Angular)
         let old_x = positions.clone().slice([0..batch_size, 0..self.n_particles, 0..1]);
 
-        for _ in 0..self.config.num_iterations {
+        for _ in 0..self.config.constraint_iterations {
             let x1 = predicted.clone().select(1, self.edge_idx_1.clone()); // [B, n_edges, 2]
             let x2 = predicted.clone().select(1, self.edge_idx_2.clone());
 
@@ -659,11 +661,21 @@ impl<B: Backend> Walker<B> {
         velocities = (predicted.clone() - positions) / self.config.time_step;
         positions = predicted;
 
+        let root_y = positions
+            .clone()
+            .slice([0..batch_size, 0..1, 1..2])
+            .squeeze_dim::<2>(1)
+            .squeeze_dim::<1>(1);
+        let is_below = root_y.lower_equal_elem(self.config.fall_y);
+        let fallen_time = (state.fallen_time + self.config.time_step)
+            .mask_where(is_below, Tensor::zeros([batch_size], &positions.device()));
+
         PhysicsState {
             positions,
             velocities,
             time: state.time + self.config.time_step,
             target_velocity: state.target_velocity,
+            fallen_time,
         }
     }
 }

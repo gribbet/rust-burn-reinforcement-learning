@@ -16,6 +16,7 @@ impl<B: Backend> EnvironmentState<B> for PhysicsState<B> {
             velocities: state.velocities.inner(),
             time: state.time.inner(),
             target_velocity: state.target_velocity.inner(),
+            fallen_time: state.fallen_time.inner(),
         }
     }
 
@@ -25,6 +26,7 @@ impl<B: Backend> EnvironmentState<B> for PhysicsState<B> {
             velocities: Tensor::from_inner(state.velocities),
             time: Tensor::from_inner(state.time),
             target_velocity: Tensor::from_inner(state.target_velocity),
+            fallen_time: Tensor::from_inner(state.fallen_time),
         }
     }
 
@@ -39,7 +41,8 @@ impl<B: Backend> EnvironmentState<B> for PhysicsState<B> {
                 .mask_where(mask_3d.clone().expand(pos_shape), other.positions),
             velocities: self.velocities.mask_where(mask_3d.expand(vel_shape), other.velocities),
             time: self.time.mask_where(mask.clone(), other.time),
-            target_velocity: self.target_velocity.mask_where(mask, other.target_velocity),
+            target_velocity: self.target_velocity.mask_where(mask.clone(), other.target_velocity),
+            fallen_time: self.fallen_time.mask_where(mask, other.fallen_time),
         }
     }
 }
@@ -88,12 +91,12 @@ impl<B: Backend> TrainingEnv<B> {
         let next_state = self.walker.step(state.clone(), action.clone());
 
         // Done conditions
-        // Root is particle 0. Y is index 1.
+        let is_fallen = next_state.fallen_time.clone().greater_equal_elem(1.0);
+
+        // Reward function
         let batch_size = next_state.positions.dims()[0];
         let root_pos_next =
             next_state.positions.clone().slice([0..batch_size, 0..1, 0..2]).squeeze_dim::<2>(1);
-        let root_y = root_pos_next.clone().slice([0..batch_size, 1..2]).squeeze_dim::<1>(1);
-        let is_fallen = root_y.lower_equal_elem(self.walker.config.fall_y);
 
         // Reward function
         let root_x_next = root_pos_next.slice([0..batch_size, 0..1]).squeeze_dim::<1>(1);
