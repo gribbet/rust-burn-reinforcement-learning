@@ -108,6 +108,9 @@ pub struct Walker<B: Backend> {
     pub edge_map_1_3d: Tensor<B, 3>,
     pub edge_map_2_3d: Tensor<B, 3>,
 
+    pub joint_map_combined: Tensor<B, 3>,
+    pub edge_map_combined: Tensor<B, 3>,
+
     pub joint_angle_min: Tensor<B, 1>,
     pub joint_angle_max: Tensor<B, 1>,
 
@@ -255,6 +258,11 @@ impl<B: Backend> Walker<B> {
         let edge_map_1_3d = edge_map_1.clone().unsqueeze::<3>();
         let edge_map_2_3d = edge_map_2.clone().unsqueeze::<3>();
 
+        let joint_map_combined =
+            Tensor::cat(vec![joint_map_p_3d.clone(), joint_map_j_3d.clone(), joint_map_c_3d.clone()], 2);
+        let edge_map_combined =
+            Tensor::cat(vec![edge_map_1_3d.clone(), edge_map_2_3d.clone().neg()], 2);
+
         let joint_angle_min_vec: Vec<f32> = joint_limits.iter().map(|l| l.0).collect();
         let joint_angle_max_vec: Vec<f32> = joint_limits.iter().map(|l| l.1).collect();
         let joint_angle_min = Tensor::from_floats(joint_angle_min_vec.as_slice(), device);
@@ -310,6 +318,8 @@ impl<B: Backend> Walker<B> {
             joint_map_c_3d,
             edge_map_1_3d,
             edge_map_2_3d,
+            joint_map_combined,
+            edge_map_combined,
             joint_angle_min,
             joint_angle_max,
             masses,
@@ -464,9 +474,8 @@ impl<B: Backend> Walker<B> {
         let f_parent = perp_parent * f_parent_mag;
         let f_joint = (f_child.clone() + f_parent.clone()).neg();
 
-        let actuation_forces = self.joint_map_p_3d.clone().matmul(f_parent)
-            + self.joint_map_j_3d.clone().matmul(f_joint)
-            + self.joint_map_c_3d.clone().matmul(f_child);
+        let combined_forces = Tensor::cat(vec![f_parent, f_joint, f_child], 1);
+        let actuation_forces = self.joint_map_combined.clone().matmul(combined_forces);
 
         acc = acc + actuation_forces * self.inv_masses_reshaped.clone();
 
@@ -490,8 +499,8 @@ impl<B: Backend> Walker<B> {
             let c1 = correction.clone() * (self.edge_w1.clone() / self.edge_w_sum.clone());
             let c2 = correction * (self.edge_w2.clone() / self.edge_w_sum.clone());
 
-            let correction_total =
-                self.edge_map_1_3d.clone().matmul(c1) - self.edge_map_2_3d.clone().matmul(c2);
+            let combined_corrections = Tensor::cat(vec![c1, c2], 1);
+            let correction_total = self.edge_map_combined.clone().matmul(combined_corrections);
             predicted = predicted + correction_total;
 
             // --- Angular Constraints (XPBD) ---
@@ -560,9 +569,8 @@ impl<B: Backend> Walker<B> {
             let dc = grad_c * delta_lambda.clone() * self.joint_w_c.clone();
             let dj = grad_j * delta_lambda.clone() * self.joint_w_j.clone();
 
-            let correction_total = self.joint_map_p_3d.clone().matmul(dp)
-                + self.joint_map_j_3d.clone().matmul(dj)
-                + self.joint_map_c_3d.clone().matmul(dc);
+            let combined_corrections = Tensor::cat(vec![dp, dj, dc], 1);
+            let correction_total = self.joint_map_combined.clone().matmul(combined_corrections);
 
             predicted = predicted + correction_total;
 
