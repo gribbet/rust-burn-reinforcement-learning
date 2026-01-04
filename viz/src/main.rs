@@ -2,7 +2,7 @@ use burn::backend::libtorch::{LibTorch, LibTorchDevice};
 use burn::prelude::*;
 use burn::record::{BinFileRecorder, FullPrecisionSettings};
 use macroquad::prelude::*;
-use shared::model::ActorCritic;
+use shared::model::Agent;
 use shared::physics::{PhysicsState, Walker, WalkerConfig};
 
 fn window_conf() -> Conf {
@@ -26,17 +26,17 @@ async fn main() {
     let initial_obs = walker.get_observation(&state);
     let input_dim = initial_obs.dims()[1];
     let action_dim = walker.action_dim();
-    let mut model = ActorCritic::<LibTorch>::new(input_dim, action_dim, &device);
+    let mut agent = Agent::<LibTorch>::new(input_dim, action_dim, &device);
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-    let mut model_loaded = false;
+    let mut agent_loaded = false;
 
-    match model.clone().load_file("model", &recorder, &device) {
-        Ok(loaded_model) => {
-            model = loaded_model;
-            model_loaded = true;
-            println!("Model loaded successfully.");
+    match agent.clone().load_file("agent", &recorder, &device) {
+        Ok(loaded_agent) => {
+            agent = loaded_agent;
+            agent_loaded = true;
+            println!("Agent loaded successfully.");
         }
-        Err(e) => println!("Model file not found at model.bin. Using zero actions. Error: {:?}", e),
+        Err(e) => println!("Agent file not found at agent.bin. Using zero actions. Error: {:?}", e),
     }
 
     loop {
@@ -44,9 +44,10 @@ async fn main() {
 
         state.target_velocity = Tensor::from_floats([1.0], &device);
 
-        let action = if model_loaded {
+        let action = if agent_loaded {
             let obs = walker.get_observation(&state);
-            let (mean, _, _) = model.forward(obs);
+            let normalized_obs = agent.normalizer.normalize(obs);
+            let (mean, _, _) = agent.model.forward(normalized_obs);
             mean.tanh()
         } else {
             // Zero action to verify physics stability

@@ -3,13 +3,13 @@ use crate::env::{EnvironmentState, TrainingEnv, TrainingStep};
 use burn::{
     config::Config,
     grad_clipping::GradientClippingConfig,
-    module::AutodiffModule,
+    module::{AutodiffModule, Param},
     optim::{AdamConfig, GradientsParams, Optimizer},
     prelude::*,
     record::{BinFileRecorder, FullPrecisionSettings},
     tensor::{backend::AutodiffBackend, Distribution, Int},
 };
-use shared::model::ActorCritic;
+use shared::model::Agent;
 use shared::physics::PhysicsState;
 use std::time::Instant;
 
@@ -29,7 +29,7 @@ pub struct ProximalPolicyOptimizationConfig {
     pub entropy_coefficient: f32,
     #[config(default = 0.5)]
     pub value_coefficient: f32,
-    #[config(default = 3e-4)]
+    #[config(default = 1e-3)]
     pub learning_rate: f64,
     #[config(default = 4)]
     pub update_epochs: usize,
@@ -67,19 +67,17 @@ pub fn train<B: AutodiffBackend>(
     let input_dimension = observation.dims()[1];
     let action_dimension = environment.action_dim();
 
-    let mut obs_mean = Tensor::<B::InnerBackend, 2>::zeros([1, input_dimension], &device);
-    let mut obs_var = Tensor::<B::InnerBackend, 2>::ones([1, input_dimension], &device);
+    let mut agent = Agent::<B>::new(input_dimension, action_dimension, &device);
     let mut obs_count = 1e-4f32;
-
-    let mut model = ActorCritic::<B>::new(input_dimension, action_dimension, &device);
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-    if std::path::Path::new("model.bin").exists() {
-        match model.clone().load_file("model", &recorder, &device) {
-            Ok(loaded_model) => {
-                model = loaded_model;
-                println!("Successfully loaded existing model from model.bin");
+    if std::path::Path::new("agent.bin").exists() {
+        match agent.clone().load_file("agent", &recorder, &device) {
+            Ok(loaded_agent) => {
+                agent = loaded_agent;
+                obs_count = agent.normalizer.count.val().to_data().as_slice::<f32>().unwrap()[0];
+                println!("Successfully loaded existing agent from agent.bin");
             }
-            Err(e) => println!("Failed to load existing model: {:?}", e),
+            Err(e) => println!("Failed to load existing agent: {:?}", e),
         }
     }
 
@@ -95,42 +93,44 @@ pub fn train<B: AutodiffBackend>(
     for i in 0..iterations {
         let iteration_start = Instant::now();
 
+        let agent_valid = agent.clone().valid();
+
         let rollout = collect_rollout(
-            &model,
+            &agent_valid,
             &environment,
             &mut observation,
             &mut state,
             &mut current_episode_rewards,
-            &obs_mean,
-            &obs_var,
             &config,
             &device,
             i % 10 == 0 || i == iterations - 1,
         );
 
         // Update observation normalization statistics
-        let batch_obs = Tensor::<B::InnerBackend, 2>::cat(rollout.observations.clone(), 0);
+        let batch_obs = Tensor::<B::InnerBackend, 2>::cat(rollout.observations, 0);
         let batch_mean = batch_obs.clone().mean_dim(0);
         let batch_var = batch_obs.clone().var(0);
         let batch_count = (environments_count * rollout_length) as f32;
 
-        let delta = batch_mean.clone() - obs_mean.clone();
+        let current_mean = agent_valid.normalizer.mean.val();
+        let current_var = agent_valid.normalizer.var.val();
+
+        let delta = batch_mean.clone() - current_mean.clone();
         let total_count = obs_count + batch_count;
 
-        let new_mean = obs_mean.clone() + delta.clone() * (batch_count / total_count);
-        let m_a = obs_var.clone() * obs_count;
+        let new_mean = current_mean + delta.clone() * (batch_count / total_count);
+        let m_a = current_var * obs_count;
         let m_b = batch_var * batch_count;
         let m_2 = m_a + m_b + delta.powf_scalar(2.0) * (obs_count * batch_count / total_count);
         let new_var = m_2 / total_count;
 
-        obs_mean = new_mean;
-        obs_var = new_var;
+        agent.normalizer.mean = Param::from_tensor(Tensor::from_inner(new_mean.clone()));
+        agent.normalizer.var = Param::from_tensor(Tensor::from_inner(new_var.clone()));
         obs_count = total_count;
 
-        let model_valid = model.clone().valid();
-        let last_obs_norm = (observation.clone().inner() - obs_mean.clone())
-            / (obs_var.clone().sqrt().add_scalar(1e-8));
-        let (_, _, last_values) = model_valid.forward(last_obs_norm);
+        let new_std = new_var.clone().sqrt().add_scalar(1e-8);
+        let last_obs_norm = (observation.clone().inner() - new_mean.clone()) / new_std.clone();
+        let (_, _, last_values) = agent_valid.model.forward(last_obs_norm);
         let next_value = last_values.squeeze_dim::<1>(1);
 
         let (returns_tensor, advantages_tensor) = compute_generalized_advantage_estimation(
@@ -141,7 +141,6 @@ pub fn train<B: AutodiffBackend>(
             &config,
         );
 
-        let observation_tensor = Tensor::<B, 2>::from_inner(Tensor::cat(rollout.observations, 0));
         let actions_tensor = Tensor::<B, 2>::from_inner(Tensor::cat(rollout.actions, 0));
         let log_probabilities_tensor =
             Tensor::<B, 1>::from_inner(Tensor::cat(rollout.log_probabilities, 0));
@@ -149,10 +148,7 @@ pub fn train<B: AutodiffBackend>(
         let advantages_tensor = Tensor::<B, 1>::from_inner(advantages_tensor);
         let old_values_tensor = Tensor::<B, 1>::from_inner(Tensor::cat(rollout.values, 0));
 
-        let normalized_observation_tensor = (observation_tensor.clone().inner()
-            - obs_mean.clone().expand(observation_tensor.dims()))
-            / (obs_var.clone().sqrt().add_scalar(1e-8).expand(observation_tensor.dims()));
-        let observation_tensor = Tensor::<B, 2>::from_inner(normalized_observation_tensor);
+        let observation_tensor = Tensor::<B, 2>::from_inner((batch_obs - new_mean) / new_std);
 
         let advantages_mean = advantages_tensor.clone().mean();
         let advantages_standard_deviation =
@@ -182,7 +178,7 @@ pub fn train<B: AutodiffBackend>(
                 let batch_old_values = old_values_tensor.clone().select(0, batch_indices.clone());
 
                 let loss = compute_proximal_policy_optimization_loss(
-                    &model,
+                    &agent,
                     batch_observations,
                     batch_actions,
                     batch_old_log_probabilities,
@@ -193,8 +189,8 @@ pub fn train<B: AutodiffBackend>(
                 );
 
                 let grads = loss.backward();
-                let grads = GradientsParams::from_grads(grads, &model);
-                model = optimizer.step(learning_rate, model, grads);
+                let grads = GradientsParams::from_grads(grads, &agent);
+                agent = optimizer.step(learning_rate, agent, grads);
             }
         }
 
@@ -225,10 +221,12 @@ pub fn train<B: AutodiffBackend>(
 
             if i % 10 == 0 {
                 let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-                model
+                agent.normalizer.count =
+                    Param::from_tensor(Tensor::from_floats([obs_count], &device));
+                agent
                     .clone()
-                    .save_file("model", &recorder)
-                    .expect("Should be able to save the model");
+                    .save_file("agent", &recorder)
+                    .expect("Should be able to save the agent");
             }
         }
     }
@@ -240,12 +238,13 @@ pub fn train<B: AutodiffBackend>(
     println!("Training finished in {:02}:{:02}:{:02}.", hours, minutes, seconds);
 
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-    model.save_file("model", &recorder).expect("Should be able to save the model");
-    println!("Model saved to model.bin");
+    agent.normalizer.count = Param::from_tensor(Tensor::from_floats([obs_count], &device));
+    agent.save_file("agent", &recorder).expect("Should be able to save the agent");
+    println!("Agent saved to agent.bin");
 }
 
 fn compute_proximal_policy_optimization_loss<B: AutodiffBackend>(
-    model: &ActorCritic<B>,
+    agent: &Agent<B>,
     observation: Tensor<B, 2>,
     actions: Tensor<B, 2>,
     old_log_probabilities: Tensor<B, 1>,
@@ -260,7 +259,7 @@ fn compute_proximal_policy_optimization_loss<B: AutodiffBackend>(
         value_coefficient,
         ..
     } = *config;
-    let (mean, log_std, values) = model.forward(observation);
+    let (mean, log_std, values) = agent.model.forward(observation);
     let values = values.squeeze_dim::<1>(1);
 
     let distribution = DiagonalGaussian::new(mean, log_std.clamp(-5.0, 2.0));
@@ -285,19 +284,16 @@ fn compute_proximal_policy_optimization_loss<B: AutodiffBackend>(
 }
 
 fn collect_rollout<B: AutodiffBackend>(
-    model: &ActorCritic<B>,
+    agent_valid: &Agent<B::InnerBackend>,
     environment: &TrainingEnv<B::InnerBackend>,
     observation_outer: &mut Tensor<B, 2>,
     state_outer: &mut PhysicsState<B>,
     current_episode_rewards: &mut Tensor<B::InnerBackend, 1>,
-    obs_mean: &Tensor<B::InnerBackend, 2>,
-    obs_var: &Tensor<B::InnerBackend, 2>,
     config: &ProximalPolicyOptimizationConfig,
     device: &B::Device,
     compute_metrics: bool,
 ) -> Rollout<B::InnerBackend> {
     let ProximalPolicyOptimizationConfig { environments_count, rollout_length, .. } = *config;
-    let model_valid = model.clone().valid();
     let action_dim = environment.action_dim();
 
     let action_noise = Tensor::<B::InnerBackend, 3>::random(
@@ -313,13 +309,14 @@ fn collect_rollout<B: AutodiffBackend>(
 
     let mut rollout = Rollout::<B::InnerBackend>::new(rollout_length);
 
-    let obs_std = obs_var.clone().sqrt().add_scalar(1e-8);
+    let obs_mean = agent_valid.normalizer.mean.val();
+    let obs_std = agent_valid.normalizer.var.val().sqrt().add_scalar(1e-8);
 
     for step in 0..rollout_length {
         let noise = action_noise.clone().slice([step..step + 1]).squeeze_dim::<2>(0);
 
         let normalized_obs = (observation.clone() - obs_mean.clone()) / obs_std.clone();
-        let (mean, log_std, value) = model_valid.forward(normalized_obs);
+        let (mean, log_std, value) = agent_valid.model.forward(normalized_obs);
         let distribution = DiagonalGaussian::new(mean, log_std);
 
         let action = distribution.sample(noise);

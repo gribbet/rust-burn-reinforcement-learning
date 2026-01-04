@@ -34,6 +34,44 @@ impl<B: Backend> ActorCritic<B> {
 }
 
 #[derive(Module, Debug)]
+pub struct Normalizer<B: Backend> {
+    pub mean: Param<Tensor<B, 2>>,
+    pub var: Param<Tensor<B, 2>>,
+    pub count: Param<Tensor<B, 1>>,
+}
+
+impl<B: Backend> Normalizer<B> {
+    pub fn new(input_dimension: usize, device: &B::Device) -> Self {
+        Self {
+            mean: Param::from_tensor(Tensor::zeros([1, input_dimension], device)),
+            var: Param::from_tensor(Tensor::ones([1, input_dimension], device)),
+            count: Param::from_tensor(Tensor::from_floats([1e-4], device)),
+        }
+    }
+
+    pub fn normalize(&self, x: Tensor<B, 2>) -> Tensor<B, 2> {
+        let mean = self.mean.val();
+        let var = self.var.val();
+        (x - mean.detach()) / (var.detach().sqrt().add_scalar(1e-8))
+    }
+}
+
+#[derive(Module, Debug)]
+pub struct Agent<B: Backend> {
+    pub model: ActorCritic<B>,
+    pub normalizer: Normalizer<B>,
+}
+
+impl<B: Backend> Agent<B> {
+    pub fn new(input_dimension: usize, action_dimension: usize, device: &B::Device) -> Self {
+        Self {
+            model: ActorCritic::new(input_dimension, action_dimension, device),
+            normalizer: Normalizer::new(input_dimension, device),
+        }
+    }
+}
+
+#[derive(Module, Debug)]
 pub struct MultiLayerPerceptron<B: Backend> {
     layer_1: Linear<B>,
     layer_2: Linear<B>,
