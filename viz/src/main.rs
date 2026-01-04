@@ -94,6 +94,14 @@ fn draw_simulation<B: Backend>(state: &PhysicsState<B>, walker: &Walker<B>) {
         draw_line(s_x1, s_y1, s_x2, s_y2, 4.0, BLACK);
     }
 
+    // Draw vertices
+    for i in 0..(pos_slice.len() / 2) {
+        let (x, y) = get_pos(i);
+        let s_x = draw_x_offset + x * scale;
+        let s_y = ground_y - y * scale;
+        draw_circle(s_x, s_y, 2.0, BLACK);
+    }
+
     // Draw Info
     let (root_x, root_y) = get_pos(0);
     draw_text(&format!("X: {:.2}", root_x), 20.0, 20.0, 20.0, BLACK);
