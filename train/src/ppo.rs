@@ -3,12 +3,13 @@ use crate::env::{EnvironmentState, TrainingEnv, TrainingStep};
 use burn::{
     config::Config,
     grad_clipping::GradientClippingConfig,
-    module::{AutodiffModule, Param},
+    module::AutodiffModule,
     optim::{AdamConfig, GradientsParams, Optimizer},
     prelude::*,
     record::{BinFileRecorder, FullPrecisionSettings},
     tensor::{backend::AutodiffBackend, Distribution, Int},
 };
+use chrono;
 use shared::model::Agent;
 use shared::physics::PhysicsState;
 use std::time::Instant;
@@ -29,11 +30,11 @@ pub struct ProximalPolicyOptimizationConfig {
     pub entropy_coefficient: f32,
     #[config(default = 0.5)]
     pub value_coefficient: f32,
-    #[config(default = 1e-3)]
+    #[config(default = 3e-4)]
     pub learning_rate: f64,
-    #[config(default = 4)]
+    #[config(default = 2)]
     pub update_epochs: usize,
-    #[config(default = 32)]
+    #[config(default = 16)]
     pub minibatches: usize,
     #[config(default = 0.5)]
     pub max_grad_norm: f32,
@@ -68,13 +69,11 @@ pub fn train<B: AutodiffBackend>(
     let action_dimension = environment.action_dim();
 
     let mut agent = Agent::<B>::new(input_dimension, action_dimension, &device);
-    let mut obs_count = 1e-4f32;
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
     if std::path::Path::new("agent.bin").exists() {
         match agent.clone().load_file("agent", &recorder, &device) {
             Ok(loaded_agent) => {
                 agent = loaded_agent;
-                obs_count = agent.normalizer.count.val().to_data().as_slice::<f32>().unwrap()[0];
                 println!("Successfully loaded existing agent from agent.bin");
             }
             Err(e) => println!("Failed to load existing agent: {:?}", e),
@@ -87,6 +86,7 @@ pub fn train<B: AutodiffBackend>(
 
     println!("Starting training for {} iterations...", iterations);
     println!("Total steps per iteration: {}", environments_count * rollout_length);
+    println!("Training started at: {}", chrono::Local::now().format("%Y-%m-%d %H:%M:%S"));
 
     let start_time = Instant::now();
 
@@ -108,27 +108,12 @@ pub fn train<B: AutodiffBackend>(
 
         // Update observation normalization statistics
         let batch_obs = Tensor::<B::InnerBackend, 2>::cat(rollout.observations, 0);
-        let batch_mean = batch_obs.clone().mean_dim(0);
-        let batch_var = batch_obs.clone().var(0);
-        let batch_count = (environments_count * rollout_length) as f32;
+        agent.normalizer.update(Tensor::<B, 2>::from_inner(batch_obs.clone()));
 
-        let current_mean = agent_valid.normalizer.mean.val();
-        let current_var = agent_valid.normalizer.var.val();
-
-        let delta = batch_mean.clone() - current_mean.clone();
-        let total_count = obs_count + batch_count;
-
-        let new_mean = current_mean + delta.clone() * (batch_count / total_count);
-        let m_a = current_var * obs_count;
-        let m_b = batch_var * batch_count;
-        let m_2 = m_a + m_b + delta.powf_scalar(2.0) * (obs_count * batch_count / total_count);
-        let new_var = m_2 / total_count;
-
-        agent.normalizer.mean = Param::from_tensor(Tensor::from_inner(new_mean.clone()));
-        agent.normalizer.var = Param::from_tensor(Tensor::from_inner(new_var.clone()));
-        obs_count = total_count;
-
+        let new_mean = agent.normalizer.mean.val().inner();
+        let new_var = agent.normalizer.var.val().inner();
         let new_std = new_var.clone().sqrt().add_scalar(1e-8);
+
         let last_obs_norm = (observation.clone().inner() - new_mean.clone()) / new_std.clone();
         let (_, _, last_values) = agent_valid.model.forward(last_obs_norm);
         let next_value = last_values.squeeze_dim::<1>(1);
@@ -221,8 +206,6 @@ pub fn train<B: AutodiffBackend>(
 
             if i % 10 == 0 {
                 let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-                agent.normalizer.count =
-                    Param::from_tensor(Tensor::from_floats([obs_count], &device));
                 agent
                     .clone()
                     .save_file("agent", &recorder)
@@ -238,7 +221,6 @@ pub fn train<B: AutodiffBackend>(
     println!("Training finished in {:02}:{:02}:{:02}.", hours, minutes, seconds);
 
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
-    agent.normalizer.count = Param::from_tensor(Tensor::from_floats([obs_count], &device));
     agent.save_file("agent", &recorder).expect("Should be able to save the agent");
     println!("Agent saved to agent.bin");
 }

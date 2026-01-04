@@ -54,6 +54,35 @@ impl<B: Backend> Normalizer<B> {
         let var = self.var.val();
         (x - mean.detach()) / (var.detach().sqrt().add_scalar(1e-8))
     }
+
+    pub fn update(&mut self, batch_obs: Tensor<B, 2>) {
+        let batch_mean = batch_obs.clone().mean_dim(0);
+        let batch_var = batch_obs.clone().var(0);
+        let batch_count = batch_obs.dims()[0] as f32;
+
+        let current_mean = self.mean.val();
+        let current_var = self.var.val();
+        let current_count = self.count.val();
+
+        let delta = batch_mean.clone() - current_mean.clone();
+        let total_count = current_count.clone().add_scalar(batch_count);
+        let total_count_reshaped = total_count.clone().reshape([1, 1]);
+
+        let new_mean = current_mean
+            + delta.clone() * (total_count_reshaped.clone().recip().mul_scalar(batch_count));
+        let m_a = current_var * current_count.clone().reshape([1, 1]);
+        let m_b = batch_var * batch_count;
+        let m_2 = m_a
+            + m_b
+            + delta.powf_scalar(2.0)
+                * (current_count.reshape([1, 1]).mul_scalar(batch_count)
+                    / total_count_reshaped.clone());
+        let new_var = m_2 / total_count_reshaped;
+
+        self.mean = Param::from_tensor(new_mean.detach());
+        self.var = Param::from_tensor(new_var.detach());
+        self.count = Param::from_tensor(total_count.detach());
+    }
 }
 
 #[derive(Module, Debug)]

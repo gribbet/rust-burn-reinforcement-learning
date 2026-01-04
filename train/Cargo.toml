@@ -5,5 +5,6 @@ version = "0.1.0"
 
 [dependencies]
 burn = {version = "0.19", features = ["tch", "autodiff"]}
+chrono = "0.4.42"
 rand = "0.8"
 shared = {path = "../shared"}
