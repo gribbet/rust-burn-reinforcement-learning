@@ -36,16 +36,14 @@ pub fn approx_atan2<B: Backend>(y: Tensor<B, 3>, x: Tensor<B, 3>) -> Tensor<B, 3
     let pi_2 = pi / 2.0;
 
     let x_neg = x.clone().lower_elem(0.0);
+    let y_neg = y.clone().lower_elem(0.0);
 
-    // Standard atan2 logic:
-    // x > 0: atan(y/x)
-    // x < 0: atan(y/x) + sign(y) * pi
-    // x = 0: sign(y) * pi/2
-
-    let y_sign = y.clone().sign();
-    let offset = y_sign.clone() * pi;
+    // x < 0: atan(y/x) + (y < 0 ? -pi : pi)
+    let offset = y_neg.clone().float().mul_scalar(-2.0).add_scalar(1.0) * pi;
     let mut res = atan_z.clone().mask_where(x_neg, atan_z + offset);
 
+    // x = 0: sign(y) * pi/2
+    let y_sign = y.clone().sign();
     let res_x_zero = y_sign * pi_2;
     res = res.mask_where(x_zero, res_x_zero);
 

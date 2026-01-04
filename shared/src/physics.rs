@@ -18,31 +18,63 @@ impl Morphology {
     pub fn humanoid() -> Self {
         Self {
             root: Segment {
-                length: 0.6, // Torso
+                length: 0.25, // Head (Top to Neck)
                 angle_min: -1e9,
                 angle_max: 1e9,
                 children: vec![
-                    // Left Leg
+                    // Torso (Neck to Hips)
                     Segment {
-                        length: 0.4,
-                        angle_min: -1.0,
-                        angle_max: 1.0,
+                        length: 0.6,
+                        angle_min: -0.2,
+                        angle_max: 0.2,
+                        children: vec![
+                            // Left Leg
+                            Segment {
+                                length: 0.45,
+                                angle_min: -1.0,
+                                angle_max: 1.0,
+                                children: vec![Segment {
+                                    length: 0.45,
+                                    angle_min: -2.0,
+                                    angle_max: 0.0,
+                                    children: vec![],
+                                }],
+                            },
+                            // Right Leg
+                            Segment {
+                                length: 0.45,
+                                angle_min: -1.0,
+                                angle_max: 1.0,
+                                children: vec![Segment {
+                                    length: 0.45,
+                                    angle_min: -2.0,
+                                    angle_max: 0.0,
+                                    children: vec![],
+                                }],
+                            },
+                        ],
+                    },
+                    // Left Arm (Shoulder to Elbow)
+                    Segment {
+                        length: 0.3,
+                        angle_min: -1.5,
+                        angle_max: 1.5,
                         children: vec![Segment {
-                            length: 0.4,
-                            angle_min: -2.0,
-                            angle_max: 0.0,
+                            length: 0.3,
+                            angle_min: 0.0,
+                            angle_max: 2.5,
                             children: vec![],
                         }],
                     },
-                    // Right Leg
+                    // Right Arm (Shoulder to Elbow)
                     Segment {
-                        length: 0.4,
-                        angle_min: -1.0,
-                        angle_max: 1.0,
+                        length: 0.3,
+                        angle_min: -1.5,
+                        angle_max: 1.5,
                         children: vec![Segment {
-                            length: 0.4,
-                            angle_min: -2.0,
-                            angle_max: 0.0,
+                            length: 0.3,
+                            angle_min: 0.0,
+                            angle_max: 2.5,
                             children: vec![],
                         }],
                     },
@@ -69,7 +101,7 @@ impl Default for WalkerConfig {
             morphology: Morphology::humanoid(),
             time_step: 0.02,
             friction: 1.0,
-            torque_magnitude: 20.0,
+            torque_magnitude: 40.0,
             mass_density: 5.0,
             fall_y: 0.75,
         }
@@ -114,6 +146,9 @@ pub struct Walker<B: Backend> {
     pub joint_angle_min: Tensor<B, 1>,
     pub joint_angle_max: Tensor<B, 1>,
 
+    pub joint_parent_lengths: Tensor<B, 3>,
+    pub joint_child_lengths: Tensor<B, 3>,
+
     pub masses: Tensor<B, 1>,
     pub inv_masses: Tensor<B, 1>,
     pub n_particles: usize,
@@ -150,6 +185,8 @@ impl<B: Backend> Walker<B> {
         let mut edges = Vec::new();
         let mut joint_pairs = Vec::new();
         let mut joint_limits = Vec::new();
+        let mut joint_parent_lengths_vec = Vec::new();
+        let mut joint_child_lengths_vec = Vec::new();
 
         // First pass: count particles and build structure
         fn count_segments(seg: &Segment) -> usize {
@@ -167,10 +204,10 @@ impl<B: Backend> Walker<B> {
         let mut init_parent_edge = Vec::new();
 
         // Stack for DFS: (segment, start_node_idx, parent_start_node_idx, parent_edge_idx)
-        let mut stack = vec![(&config.morphology.root, 0usize, None::<usize>, None::<usize>)];
+        let mut stack = vec![(&config.morphology.root, 0usize, None::<usize>)];
         let mut next_particle_id = 1;
 
-        while let Some((seg, start_idx, parent_start_opt, parent_edge_opt)) = stack.pop() {
+        while let Some((seg, start_idx, parent_edge_opt)) = stack.pop() {
             let end_idx = next_particle_id;
             let current_edge_idx = init_p1.len();
             next_particle_id += 1;
@@ -188,14 +225,17 @@ impl<B: Backend> Walker<B> {
             masses_vec[start_idx] += seg_mass * 0.5;
             masses_vec[end_idx] += seg_mass * 0.5;
 
-            if let Some(parent_start) = parent_start_opt {
+            if let Some(parent_edge_idx) = parent_edge_opt {
+                let parent_start = init_p1[parent_edge_idx];
                 // Joint at start_idx
                 joint_pairs.push((parent_start, start_idx, end_idx));
                 joint_limits.push((seg.angle_min, seg.angle_max));
+                joint_parent_lengths_vec.push(init_lengths[parent_edge_idx]);
+                joint_child_lengths_vec.push(seg.length);
             }
 
             for child in &seg.children {
-                stack.push((child, end_idx, Some(start_idx), Some(current_edge_idx)));
+                stack.push((child, end_idx, Some(current_edge_idx)));
             }
         }
 
@@ -235,6 +275,13 @@ impl<B: Backend> Walker<B> {
         let joint_idx_p = Tensor::from_ints(joint_idx_p_vec.as_slice(), device);
         let joint_idx_j = Tensor::from_ints(joint_idx_j_vec.as_slice(), device);
         let joint_idx_c = Tensor::from_ints(joint_idx_c_vec.as_slice(), device);
+
+        let joint_parent_lengths =
+            Tensor::<B, 1>::from_floats(joint_parent_lengths_vec.as_slice(), device)
+                .reshape([1, n_joints, 1]);
+        let joint_child_lengths =
+            Tensor::<B, 1>::from_floats(joint_child_lengths_vec.as_slice(), device)
+                .reshape([1, n_joints, 1]);
 
         let mut joint_map_p_data = vec![0.0; n_particles * n_joints];
         let mut joint_map_j_data = vec![0.0; n_particles * n_joints];
@@ -324,6 +371,8 @@ impl<B: Backend> Walker<B> {
             edge_map_combined,
             joint_angle_min,
             joint_angle_max,
+            joint_parent_lengths,
+            joint_child_lengths,
             masses,
             inv_masses,
             n_particles,
@@ -358,8 +407,8 @@ impl<B: Backend> Walker<B> {
     pub fn initial_state(&self, batch_size: usize, device: &B::Device) -> PhysicsState<B> {
         let mut positions = Tensor::<B, 3>::zeros([batch_size, self.n_particles, 2], device);
 
-        // Root start (Shoulders) at [0, 1.5]
-        let root_start = Tensor::<B, 1>::from_floats([0.0, 1.5], device)
+        // Root start (Top of Head) at [0, 1.8]
+        let root_start = Tensor::<B, 1>::from_floats([0.0, 1.8], device)
             .reshape([1, 1, 2])
             .expand([batch_size, 1, 2]);
         positions = positions.slice_assign([0..batch_size, 0..1, 0..2], root_start);
@@ -469,8 +518,9 @@ impl<B: Backend> Walker<B> {
 
         let torque = action.unsqueeze_dim::<3>(2); // [B, n_joints, 1]
 
-        let f_parent_mag = torque.clone() / r_parent_norm * self.config.torque_magnitude;
-        let f_child_mag = torque / r_child_norm * self.config.torque_magnitude;
+        let f_parent_mag =
+            torque.clone() / self.joint_parent_lengths.clone() * self.config.torque_magnitude;
+        let f_child_mag = torque / self.joint_child_lengths.clone() * self.config.torque_magnitude;
 
         let f_child = perp_child * f_child_mag;
         let f_parent = perp_parent * f_parent_mag;
