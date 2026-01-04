@@ -92,7 +92,7 @@ fn draw_simulation<B: Backend>(state: &PhysicsState<B>, walker: &Walker<B>) {
         let s_x2 = draw_x_offset + x2 * scale;
         let s_y2 = ground_y - y2 * scale;
 
-        draw_line(s_x1, s_y1, s_x2, s_y2, 4.0, BLACK);
+        draw_line(s_x1, s_y1, s_x2, s_y2, 6.0, BLACK);
     }
 
     // Draw vertices
@@ -100,7 +100,7 @@ fn draw_simulation<B: Backend>(state: &PhysicsState<B>, walker: &Walker<B>) {
         let (x, y) = get_pos(i);
         let s_x = draw_x_offset + x * scale;
         let s_y = ground_y - y * scale;
-        draw_circle(s_x, s_y, 2.0, BLACK);
+        draw_circle(s_x, s_y, 3.0, BLACK);
     }
 
     // Draw Info
