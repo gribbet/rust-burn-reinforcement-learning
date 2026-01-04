@@ -92,6 +92,7 @@ pub struct WalkerConfig {
     pub torque_magnitude: f32,
     pub mass_density: f32,
     pub fall_y: f32,
+    pub num_iterations: usize,
 }
 
 impl Default for WalkerConfig {
@@ -104,6 +105,7 @@ impl Default for WalkerConfig {
             torque_magnitude: 40.0,
             mass_density: 5.0,
             fall_y: 0.75,
+            num_iterations: 2,
         }
     }
 }
@@ -538,7 +540,7 @@ impl<B: Backend> Walker<B> {
         // 4. Constraints (Distance + Angular)
         let old_x = positions.clone().slice([0..batch_size, 0..self.n_particles, 0..1]);
 
-        for _ in 0..2 {
+        for _ in 0..self.config.num_iterations {
             let x1 = predicted.clone().select(1, self.edge_idx_1.clone()); // [B, n_edges, 2]
             let x2 = predicted.clone().select(1, self.edge_idx_2.clone());
 
