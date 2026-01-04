@@ -33,7 +33,7 @@ pub struct ProximalPolicyOptimizationConfig {
     pub learning_rate: f64,
     #[config(default = 4)]
     pub update_epochs: usize,
-    #[config(default = 64)]
+    #[config(default = 32)]
     pub minibatches: usize,
     #[config(default = 0.5)]
     pub max_grad_norm: f32,
@@ -188,9 +188,14 @@ pub fn train<B: AutodiffBackend>(
             let avg_episode_reward =
                 if total_episodes > 0 { rollout.total_reward / total_episodes as f32 } else { 0.0 };
 
+            let elapsed = start_time.elapsed().as_secs();
+            let hours = elapsed / 3600;
+            let minutes = (elapsed % 3600) / 60;
+            let seconds = elapsed % 60;
+
             println!(
-                "Iter {:4} | Reward: {:7.2} | Fallen: {:6.2}% | SPS: {:8.0}",
-                i, avg_episode_reward, fallen_pct, steps_per_second
+                "[{:02}:{:02}:{:02}] Iter {:4} | Reward: {:7.2} | Fallen: {:6.2}% | SPS: {:8.0}",
+                hours, minutes, seconds, i, avg_episode_reward, fallen_pct, steps_per_second,
             );
 
             if i % 10 == 0 {
@@ -203,8 +208,11 @@ pub fn train<B: AutodiffBackend>(
         }
     }
 
-    let total_time = start_time.elapsed().as_secs_f64();
-    println!("Training finished in {:.2} seconds.", total_time);
+    let elapsed = start_time.elapsed().as_secs();
+    let hours = elapsed / 3600;
+    let minutes = (elapsed % 3600) / 60;
+    let seconds = elapsed % 60;
+    println!("Training finished in {:02}:{:02}:{:02}.", hours, minutes, seconds);
 
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
     model.save_file("model", &recorder).expect("Should be able to save the model");
