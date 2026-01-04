@@ -105,14 +105,12 @@ impl<B: Backend> TrainingEnv<B> {
             .squeeze_dim::<1>(1);
 
         let distance = root_x_next - root_x_prev;
-        let progress = (distance.clone() * state.target_velocity.clone()) * 100.0; // Reward based on target direction
+        let progress = (distance.clone() * state.target_velocity.clone()) * 1.0; // Reward based on target direction
         let progress = progress.mask_where(is_fallen.clone(), Tensor::zeros_like(&distance));
 
-        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -1.0; // Efficiency penalty
+        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.01; // Efficiency penalty
 
-        let survival = (Tensor::ones_like(&progress) * 1.0)
-            .mask_where(is_fallen.clone(), Tensor::ones_like(&progress) * -100.0);
-        let reward = progress + torque_penalty + survival * 0.0;
+        let reward = progress + torque_penalty;
 
         let is_max_time = next_state.time.clone().greater_equal_elem(self.max_time);
 

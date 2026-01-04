@@ -258,8 +258,10 @@ impl<B: Backend> Walker<B> {
         let edge_map_1_3d = edge_map_1.clone().unsqueeze::<3>();
         let edge_map_2_3d = edge_map_2.clone().unsqueeze::<3>();
 
-        let joint_map_combined =
-            Tensor::cat(vec![joint_map_p_3d.clone(), joint_map_j_3d.clone(), joint_map_c_3d.clone()], 2);
+        let joint_map_combined = Tensor::cat(
+            vec![joint_map_p_3d.clone(), joint_map_j_3d.clone(), joint_map_c_3d.clone()],
+            2,
+        );
         let edge_map_combined =
             Tensor::cat(vec![edge_map_1_3d.clone(), edge_map_2_3d.clone().neg()], 2);
 

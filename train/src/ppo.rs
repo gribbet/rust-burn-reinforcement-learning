@@ -67,6 +67,10 @@ pub fn train<B: AutodiffBackend>(
     let input_dimension = observation.dims()[1];
     let action_dimension = environment.action_dim();
 
+    let mut obs_mean = Tensor::<B::InnerBackend, 2>::zeros([1, input_dimension], &device);
+    let mut obs_var = Tensor::<B::InnerBackend, 2>::ones([1, input_dimension], &device);
+    let mut obs_count = 1e-4f32;
+
     let mut model = ActorCritic::<B>::new(input_dimension, action_dimension, &device);
     let recorder = BinFileRecorder::<FullPrecisionSettings>::default();
     if std::path::Path::new("model.bin").exists() {
@@ -97,13 +101,36 @@ pub fn train<B: AutodiffBackend>(
             &mut observation,
             &mut state,
             &mut current_episode_rewards,
+            &obs_mean,
+            &obs_var,
             &config,
             &device,
             i % 10 == 0 || i == iterations - 1,
         );
 
+        // Update observation normalization statistics
+        let batch_obs = Tensor::<B::InnerBackend, 2>::cat(rollout.observations.clone(), 0);
+        let batch_mean = batch_obs.clone().mean_dim(0);
+        let batch_var = batch_obs.clone().var(0);
+        let batch_count = (environments_count * rollout_length) as f32;
+
+        let delta = batch_mean.clone() - obs_mean.clone();
+        let total_count = obs_count + batch_count;
+
+        let new_mean = obs_mean.clone() + delta.clone() * (batch_count / total_count);
+        let m_a = obs_var.clone() * obs_count;
+        let m_b = batch_var * batch_count;
+        let m_2 = m_a + m_b + delta.powf_scalar(2.0) * (obs_count * batch_count / total_count);
+        let new_var = m_2 / total_count;
+
+        obs_mean = new_mean;
+        obs_var = new_var;
+        obs_count = total_count;
+
         let model_valid = model.clone().valid();
-        let (_, _, last_values) = model_valid.forward(observation.clone().inner());
+        let last_obs_norm = (observation.clone().inner() - obs_mean.clone())
+            / (obs_var.clone().sqrt().add_scalar(1e-8));
+        let (_, _, last_values) = model_valid.forward(last_obs_norm);
         let next_value = last_values.squeeze_dim::<1>(1);
 
         let (returns_tensor, advantages_tensor) = compute_generalized_advantage_estimation(
@@ -122,6 +149,11 @@ pub fn train<B: AutodiffBackend>(
         let advantages_tensor = Tensor::<B, 1>::from_inner(advantages_tensor);
         let old_values_tensor = Tensor::<B, 1>::from_inner(Tensor::cat(rollout.values, 0));
 
+        let normalized_observation_tensor = (observation_tensor.clone().inner()
+            - obs_mean.clone().expand(observation_tensor.dims()))
+            / (obs_var.clone().sqrt().add_scalar(1e-8).expand(observation_tensor.dims()));
+        let observation_tensor = Tensor::<B, 2>::from_inner(normalized_observation_tensor);
+
         let advantages_mean = advantages_tensor.clone().mean();
         let advantages_standard_deviation =
             advantages_tensor.clone().var(0).sqrt().add_scalar(1e-8);
@@ -136,26 +168,18 @@ pub fn train<B: AutodiffBackend>(
                 Tensor::<B, 1>::random([number_of_samples], Distribution::Default, &device)
                     .argsort(0);
 
-            let shuffled_observations =
-                observation_tensor.clone().select(0, indices_tensor.clone());
-            let shuffled_actions = actions_tensor.clone().select(0, indices_tensor.clone());
-            let shuffled_log_probabilities =
-                log_probabilities_tensor.clone().select(0, indices_tensor.clone());
-            let shuffled_returns = returns_tensor.clone().select(0, indices_tensor.clone());
-            let shuffled_advantages = advantages_tensor.clone().select(0, indices_tensor.clone());
-            let shuffled_old_values = old_values_tensor.clone().select(0, indices_tensor.clone());
-
             for batch_start in (0..number_of_samples).step_by(batch_size) {
                 let batch_end = std::cmp::min(batch_start + batch_size, number_of_samples);
+                let batch_indices = indices_tensor.clone().slice([batch_start..batch_end]);
 
                 let batch_observations =
-                    shuffled_observations.clone().slice([batch_start..batch_end]);
-                let batch_actions = shuffled_actions.clone().slice([batch_start..batch_end]);
+                    observation_tensor.clone().select(0, batch_indices.clone());
+                let batch_actions = actions_tensor.clone().select(0, batch_indices.clone());
                 let batch_old_log_probabilities =
-                    shuffled_log_probabilities.clone().slice([batch_start..batch_end]);
-                let batch_returns = shuffled_returns.clone().slice([batch_start..batch_end]);
-                let batch_advantages = shuffled_advantages.clone().slice([batch_start..batch_end]);
-                let batch_old_values = shuffled_old_values.clone().slice([batch_start..batch_end]);
+                    log_probabilities_tensor.clone().select(0, batch_indices.clone());
+                let batch_returns = returns_tensor.clone().select(0, batch_indices.clone());
+                let batch_advantages = advantages_tensor.clone().select(0, batch_indices.clone());
+                let batch_old_values = old_values_tensor.clone().select(0, batch_indices.clone());
 
                 let loss = compute_proximal_policy_optimization_loss(
                     &model,
@@ -266,6 +290,8 @@ fn collect_rollout<B: AutodiffBackend>(
     observation_outer: &mut Tensor<B, 2>,
     state_outer: &mut PhysicsState<B>,
     current_episode_rewards: &mut Tensor<B::InnerBackend, 1>,
+    obs_mean: &Tensor<B::InnerBackend, 2>,
+    obs_var: &Tensor<B::InnerBackend, 2>,
     config: &ProximalPolicyOptimizationConfig,
     device: &B::Device,
     compute_metrics: bool,
@@ -287,10 +313,13 @@ fn collect_rollout<B: AutodiffBackend>(
 
     let mut rollout = Rollout::<B::InnerBackend>::new(rollout_length);
 
+    let obs_std = obs_var.clone().sqrt().add_scalar(1e-8);
+
     for step in 0..rollout_length {
         let noise = action_noise.clone().slice([step..step + 1]).squeeze_dim::<2>(0);
 
-        let (mean, log_std, value) = model_valid.forward(observation.clone());
+        let normalized_obs = (observation.clone() - obs_mean.clone()) / obs_std.clone();
+        let (mean, log_std, value) = model_valid.forward(normalized_obs);
         let distribution = DiagonalGaussian::new(mean, log_std);
 
         let action = distribution.sample(noise);
