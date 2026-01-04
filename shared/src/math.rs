@@ -1,21 +1,11 @@
 use burn::prelude::*;
 
-// Approximation of atan(z) for z in [-1, 1]
-// Polynomial: z * (0.99997726 - 0.33262347 * z^2 + 0.19354346 * z^4 - 0.11643287 * z^6 + 0.05265332 * z^8 - 0.01172120 * z^10)
+// 5th-order approximation of atan(z) for z in [-1, 1] (4th order polynomial)
+// z * (1.0 - 0.333 * z^2 + 0.193 * z^4)
 fn approx_atan_core<B: Backend>(z: Tensor<B, 3>) -> Tensor<B, 3> {
     let z2 = z.clone() * z.clone();
     let z4 = z2.clone() * z2.clone();
-    let z6 = z4.clone() * z2.clone();
-    let z8 = z4.clone() * z4.clone();
-    let z10 = z8.clone() * z2.clone();
-
-    let poly = z10 * -0.01172120
-        + z8 * 0.05265332
-        + z6 * -0.11643287
-        + z4 * 0.19354346
-        + z2 * -0.33262347
-        + 0.99997726;
-
+    let poly = z4 * 0.193 + z2 * -0.333 + 1.0;
     z * poly
 }
 
