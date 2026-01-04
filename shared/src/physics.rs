@@ -630,28 +630,23 @@ impl<B: Backend> Walker<B> {
 
             predicted = predicted + correction_total;
 
-            // --- Ground Collision ---
-            // y < 0 -> y = 0
+            // --- Ground Collision & Friction ---
             let y = predicted.clone().slice([0..batch_size, 0..self.n_particles, 1..2]);
-            let penetration = y.clone().neg().clamp_min(0.0);
+            let is_grounded = y.clone().lower_equal_elem(0.01);
 
             // Project out of ground
-            let correction_y = penetration.clone();
+            let correction_y = y.clone().neg().clamp_min(0.0);
 
             // PBD Friction
-            // Apply tangential correction opposite to movement, limited by normal impulse * friction
+            // Apply tangential correction opposite to movement when grounded
             let current_x = predicted.clone().slice([0..batch_size, 0..self.n_particles, 0..1]);
             let diff_x = current_x - old_x.clone();
 
-            // Normal impulse is proportional to correction_y
-            let max_friction = correction_y.clone() * self.config.friction;
+            let friction_correction = diff_x.neg() * self.config.friction;
+            let correction_x = Tensor::zeros_like(&friction_correction)
+                .mask_where(is_grounded, friction_correction);
 
-            // Clamp correction_x to [-max, max]
-            // We want correction_x = -diff_x, clamped.
-            let correction_x =
-                diff_x.neg().max_pair(max_friction.clone().neg()).min_pair(max_friction);
-
-            let correction_vec = Tensor::cat(vec![correction_x, correction_y.clone()], 2);
+            let correction_vec = Tensor::cat(vec![correction_x, correction_y], 2);
 
             predicted = predicted + correction_vec;
         }
