@@ -13,7 +13,7 @@ pub struct ActorCritic<B: Backend> {
 
 impl<B: Backend> ActorCritic<B> {
     pub fn new(input_dimension: usize, action_dimension: usize, device: &B::Device) -> Self {
-        let hidden_dimension = 256;
+        let hidden_dimension = 128;
         Self {
             actor: MultiLayerPerceptron::new(
                 input_dimension,
@@ -59,6 +59,19 @@ impl<B: Backend> Normalizer<B> {
         let batch_mean = batch_obs.clone().mean_dim(0);
         let batch_var = batch_obs.clone().var(0);
         let batch_count = batch_obs.dims()[0] as f32;
+
+        // Fast check: If the batch statistics contain NaN, skip the update to prevent corruption.
+        // This is much faster than element-wise masking on the entire batch.
+        let is_finite: bool = batch_mean
+            .clone()
+            .equal(batch_mean.clone())
+            .all()
+            .into_data()
+            .as_slice::<bool>()
+            .unwrap()[0];
+        if !is_finite {
+            return;
+        }
 
         let current_mean = self.mean.val();
         let current_var = self.var.val();

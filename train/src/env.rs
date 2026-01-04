@@ -99,7 +99,7 @@ impl<B: Backend> TrainingEnv<B> {
             next_state.positions.clone().slice([0..batch_size, 0..1, 0..2]).squeeze_dim::<2>(1);
 
         // Reward function
-        let root_x_next = root_pos_next.slice([0..batch_size, 0..1]).squeeze_dim::<1>(1);
+        let root_x_next = root_pos_next.clone().slice([0..batch_size, 0..1]).squeeze_dim::<1>(1);
         let root_x_prev = state
             .positions
             .clone()
@@ -113,7 +113,10 @@ impl<B: Backend> TrainingEnv<B> {
 
         let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.01; // Efficiency penalty
 
-        let reward = progress + torque_penalty;
+        let reward = (progress + torque_penalty).clamp(-10.0, 10.0);
+        // Sanitize reward: replace NaN with 0.0
+        let is_finite = reward.clone().equal(reward.clone());
+        let reward = reward.clone().mask_where(is_finite.bool_not(), Tensor::zeros_like(&reward));
 
         let is_max_time = next_state.time.clone().greater_equal_elem(self.max_time);
 

@@ -411,7 +411,7 @@ impl<B: Backend> Walker<B> {
         let mut positions = Tensor::<B, 3>::zeros([batch_size, self.n_particles, 2], device);
 
         // Root start (Top of Head) at [0, 1.8]
-        let root_start = Tensor::<B, 1>::from_floats([0.0, 1.8], device)
+        let root_start = Tensor::<B, 1>::from_floats([0.0, 2.5], device)
             .reshape([1, 1, 2])
             .expand([batch_size, 1, 2]);
         positions = positions.slice_assign([0..batch_size, 0..1, 0..2], root_start);
@@ -474,7 +474,10 @@ impl<B: Backend> Walker<B> {
         let flat_pos = rel_pos.reshape([batch_size, self.n_particles * 2]);
         let flat_vel = state.velocities.clone().reshape([batch_size, self.n_particles * 2]);
 
-        Tensor::cat(vec![flat_pos, flat_vel], 1)
+        let obs = Tensor::cat(vec![flat_pos, flat_vel], 1);
+        // Sanitize observation: replace NaN with 0.0
+        let is_finite = obs.clone().equal(obs.clone());
+        obs.clone().mask_where(is_finite.bool_not(), Tensor::zeros_like(&obs))
     }
 
     pub fn step(&self, state: PhysicsState<B>, action: Tensor<B, 2>) -> PhysicsState<B> {
@@ -614,7 +617,7 @@ impl<B: Backend> Walker<B> {
             let term_j = self.joint_w_j.clone() * (grad_j.clone() * grad_j.clone()).sum_dim(2);
 
             // Compliance alpha (small value for stability)
-            let alpha = 1e-6;
+            let alpha = 1e-4;
             let denom = term_p + term_c + term_j + alpha;
 
             // Lagrange multiplier
@@ -661,7 +664,13 @@ impl<B: Backend> Walker<B> {
             .slice([0..batch_size, 0..1, 1..2])
             .squeeze_dim::<2>(1)
             .squeeze_dim::<1>(1);
-        let is_fallen = root_y.lower_equal_elem(self.config.fall_y);
+        // Fall if too low, too high (explosion), or NaN
+        let is_fallen = root_y
+            .clone()
+            .lower_equal_elem(self.config.fall_y)
+            .bool_or(root_y.clone().greater_equal_elem(100.0))
+            .bool_or(root_y.clone().equal(root_y.clone()).bool_not());
+
         let fallen_time = (state.fallen_time + self.config.time_step)
             .mask_where(is_fallen.bool_not(), Tensor::zeros([batch_size], &positions.device()));
 

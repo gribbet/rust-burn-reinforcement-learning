@@ -30,9 +30,9 @@ pub struct ProximalPolicyOptimizationConfig {
     pub entropy_coefficient: f32,
     #[config(default = 0.5)]
     pub value_coefficient: f32,
-    #[config(default = 3e-4)]
+    #[config(default = 1e-4)]
     pub learning_rate: f64,
-    #[config(default = 2)]
+    #[config(default = 4)]
     pub update_epochs: usize,
     #[config(default = 16)]
     pub minibatches: usize,
@@ -173,9 +173,18 @@ pub fn train<B: AutodiffBackend>(
                     &config,
                 );
 
-                let grads = loss.backward();
-                let grads = GradientsParams::from_grads(grads, &agent);
-                agent = optimizer.step(learning_rate, agent, grads);
+                // Check if loss is finite before backward pass
+                let is_finite =
+                    loss.clone().equal(loss.clone()).all().into_data().as_slice::<bool>().unwrap()
+                        [0];
+
+                if is_finite {
+                    let grads = loss.backward();
+                    let grads = GradientsParams::from_grads(grads, &agent);
+                    agent = optimizer.step(learning_rate, agent, grads);
+                } else {
+                    println!("Skipping update due to non-finite loss");
+                }
             }
         }
 
@@ -184,6 +193,16 @@ pub fn train<B: AutodiffBackend>(
         let steps_per_second = number_of_samples as f64 / duration;
 
         if i % 10 == 0 || i == iterations - 1 {
+            // Calculate current policy entropy from the model's log_std parameter
+            // H = 0.5 * (1 + ln(2*pi)) + mean(log_std)
+            let log_std = agent.model.log_standard_deviation.val();
+            let entropy_val = log_std
+                .mean()
+                .add_scalar(0.5 * (1.0 + (2.0 * std::f32::consts::PI).ln()))
+                .into_data()
+                .as_slice::<f32>()
+                .unwrap()[0];
+
             let total_episodes = rollout.total_episodes;
             let fallen_pct = if total_episodes > 0 {
                 (rollout.total_fallen as f64 / total_episodes as f64) * 100.0
@@ -200,8 +219,8 @@ pub fn train<B: AutodiffBackend>(
             let seconds = elapsed % 60;
 
             println!(
-                "[{:02}:{:02}:{:02}] Iter {:4} | Reward: {:7.2} | Fallen: {:6.2}% | SPS: {:8.0}",
-                hours, minutes, seconds, i, avg_episode_reward, fallen_pct, steps_per_second,
+                "[{:02}:{:02}:{:02}] Iter {:4} | Reward: {:7.2} | Fallen: {:6.2}% | Entropy: {:5.3} | SPS: {:8.0}",
+                hours, minutes, seconds, i, avg_episode_reward, fallen_pct, entropy_val, steps_per_second,
             );
 
             if i % 10 == 0 {
@@ -248,7 +267,7 @@ fn compute_proximal_policy_optimization_loss<B: AutodiffBackend>(
     let log_probabilities = distribution.log_probability(actions);
     let entropy = distribution.entropy();
 
-    let ratio = (log_probabilities - old_log_probabilities).exp();
+    let ratio = (log_probabilities - old_log_probabilities).exp().clamp(0.0, 10.0);
     let surrogate_1 = ratio.clone() * advantages.clone();
     let surrogate_2 = ratio
         .clamp(1.0 - proximal_policy_optimization_clip, 1.0 + proximal_policy_optimization_clip)
@@ -299,7 +318,7 @@ fn collect_rollout<B: AutodiffBackend>(
 
         let normalized_obs = (observation.clone() - obs_mean.clone()) / obs_std.clone();
         let (mean, log_std, value) = agent_valid.model.forward(normalized_obs);
-        let distribution = DiagonalGaussian::new(mean, log_std);
+        let distribution = DiagonalGaussian::new(mean, log_std.clamp(-5.0, 2.0));
 
         let action = distribution.sample(noise);
         let log_probability = distribution.log_probability(action.clone());
