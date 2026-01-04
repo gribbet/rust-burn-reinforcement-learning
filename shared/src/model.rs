@@ -13,7 +13,7 @@ pub struct ActorCritic<B: Backend> {
 
 impl<B: Backend> ActorCritic<B> {
     pub fn new(input_dimension: usize, action_dimension: usize, device: &B::Device) -> Self {
-        let hidden_dimension = 128;
+        let hidden_dimension = 256;
         Self {
             actor: MultiLayerPerceptron::new(
                 input_dimension,

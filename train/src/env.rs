@@ -91,7 +91,7 @@ impl<B: Backend> TrainingEnv<B> {
         let next_state = self.walker.step(state.clone(), action.clone());
 
         // Done conditions
-        let is_fallen = next_state.fallen_time.clone().greater_equal_elem(1.0);
+        let is_fallen = next_state.fallen_time.clone().greater_equal_elem(2.0);
 
         // Reward function
         let batch_size = next_state.positions.dims()[0];

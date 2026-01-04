@@ -26,7 +26,7 @@ pub struct ProximalPolicyOptimizationConfig {
     pub generalized_advantage_estimation_lambda: f32,
     #[config(default = 0.2)]
     pub proximal_policy_optimization_clip: f32,
-    #[config(default = 0.02)]
+    #[config(default = 0.05)]
     pub entropy_coefficient: f32,
     #[config(default = 0.5)]
     pub value_coefficient: f32,

@@ -100,9 +100,9 @@ impl Default for WalkerConfig {
         Self {
             gravity: 9.8,
             morphology: Morphology::humanoid(),
-            time_step: 0.02,
+            time_step: 1.0 / 60.0,
             friction: 1.0,
-            torque_magnitude: 40.0,
+            torque_magnitude: 20.0,
             mass_density: 5.0,
             fall_y: 0.75,
             constraint_iterations: 2,
@@ -661,9 +661,9 @@ impl<B: Backend> Walker<B> {
             .slice([0..batch_size, 0..1, 1..2])
             .squeeze_dim::<2>(1)
             .squeeze_dim::<1>(1);
-        let is_below = root_y.lower_equal_elem(self.config.fall_y);
+        let is_fallen = root_y.lower_equal_elem(self.config.fall_y);
         let fallen_time = (state.fallen_time + self.config.time_step)
-            .mask_where(is_below, Tensor::zeros([batch_size], &positions.device()));
+            .mask_where(is_fallen.bool_not(), Tensor::zeros([batch_size], &positions.device()));
 
         PhysicsState {
             positions,
