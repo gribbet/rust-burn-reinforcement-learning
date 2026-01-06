@@ -1,4 +1,5 @@
 use burn::prelude::*;
+use std::f32::consts::PI;
 
 // 5th-order approximation of atan(z) for z in [-1, 1] (4th order polynomial)
 // z * (1.0 - 0.333 * z^2 + 0.193 * z^4)
@@ -17,7 +18,7 @@ pub fn approx_atan<B: Backend>(z: Tensor<B, 3>) -> Tensor<B, 3> {
 
     let res = approx_atan_core(z_core);
 
-    let pi_2 = std::f32::consts::PI / 2.0;
+    let pi_2 = PI / 2.0;
     let sign = z.clone().sign();
 
     let res_inv = sign * pi_2 - res.clone();
@@ -32,14 +33,13 @@ pub fn approx_atan2<B: Backend>(y: Tensor<B, 3>, x: Tensor<B, 3>) -> Tensor<B, 3
 
     let atan_z = approx_atan(z);
 
-    let pi = std::f32::consts::PI;
-    let pi_2 = pi / 2.0;
+    let pi_2 = PI / 2.0;
 
     let x_neg = x.clone().lower_elem(0.0);
     let y_neg = y.clone().lower_elem(0.0);
 
     // x < 0: atan(y/x) + (y < 0 ? -pi : pi)
-    let offset = y_neg.clone().float().mul_scalar(-2.0).add_scalar(1.0) * pi;
+    let offset = y_neg.clone().float().mul_scalar(-2.0).add_scalar(1.0) * PI;
     let mut res = atan_z.clone().mask_where(x_neg, atan_z + offset);
 
     // x = 0: sign(y) * pi/2

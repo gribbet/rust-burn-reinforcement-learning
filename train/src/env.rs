@@ -79,7 +79,7 @@ impl<B: Backend> TrainingEnv<B> {
         let mut state = self.walker.initial_state(environments_count, device);
 
         state.target_velocity =
-            Tensor::<B, 1>::random([environments_count], Distribution::Uniform(1.0, 1.0), device);
+            Tensor::random([environments_count], Distribution::Uniform(1.0, 1.0), device);
 
         (self.walker.get_observation(&state), state)
     }

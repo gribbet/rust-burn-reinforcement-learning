@@ -1,5 +1,5 @@
 use crate::distribution::DiagonalGaussian;
-use crate::env::{EnvironmentState, TrainingEnv, TrainingStep};
+use crate::env::{EnvironmentState, TrainingEnv};
 use burn::{
     config::Config,
     grad_clipping::GradientClippingConfig,
@@ -12,6 +12,7 @@ use burn::{
 use chrono;
 use shared::model::Agent;
 use shared::physics::PhysicsState;
+use std::f32::consts::PI;
 use std::time::Instant;
 
 #[derive(Config, Debug)]
@@ -198,7 +199,7 @@ pub fn train<B: AutodiffBackend>(
             let log_std = agent.model.log_standard_deviation.val();
             let entropy_val = log_std
                 .mean()
-                .add_scalar(0.5 * (1.0 + (2.0 * std::f32::consts::PI).ln()))
+                .add_scalar(0.5 * (1.0 + (2.0 * PI).ln()))
                 .into_data()
                 .as_slice::<f32>()
                 .unwrap()[0];
@@ -313,8 +314,8 @@ fn collect_rollout<B: AutodiffBackend>(
     let obs_mean = agent_valid.normalizer.mean.val();
     let obs_std = agent_valid.normalizer.var.val().sqrt().add_scalar(1e-8);
 
-    for step in 0..rollout_length {
-        let noise = action_noise.clone().slice([step..step + 1]).squeeze_dim::<2>(0);
+    for i in 0..rollout_length {
+        let noise = action_noise.clone().slice([i..i + 1]).squeeze_dim::<2>(0);
 
         let normalized_obs = (observation.clone() - obs_mean.clone()) / obs_std.clone();
         let (mean, log_std, value) = agent_valid.model.forward(normalized_obs);
@@ -325,21 +326,20 @@ fn collect_rollout<B: AutodiffBackend>(
         let value = value.squeeze_dim(1);
 
         let step = environment.step(state, action.clone());
-        let TrainingStep { reward, done, is_fallen, .. } = step;
 
         // Update cumulative reward
-        *current_episode_rewards = current_episode_rewards.clone() + reward.clone();
+        *current_episode_rewards = current_episode_rewards.clone() + step.reward.clone();
 
-        let is_done = done.clone().bool();
+        let is_done = step.done.clone().bool();
 
         rollout.push(
             observation.clone(),
             action,
             log_probability,
             value,
-            reward,
-            done.clone(),
-            is_fallen.clone(),
+            step.reward,
+            step.done.clone(),
+            step.is_fallen.clone(),
             current_episode_rewards.clone(),
         );
 

@@ -1,5 +1,6 @@
 use burn::prelude::*;
 use burn::tensor::Int;
+use std::f32::consts::PI;
 
 #[derive(Clone, Debug)]
 pub struct Segment {
@@ -19,73 +20,36 @@ impl Morphology {
     pub fn humanoid() -> Self {
         Self {
             root: Segment {
-                length: 0.25, // Head (Top to Neck)
+                length: 0.6, // Torso
                 angle_min: -1e9,
                 angle_max: 1e9,
                 max_torque: 0.0,
                 children: vec![
-                    // Torso (Neck to Hips)
+                    // Left Leg
                     Segment {
-                        length: 0.6,
-                        angle_min: -0.2,
-                        angle_max: 0.2,
-                        max_torque: 40.0, // Neck torque
-                        children: vec![
-                            // Left Leg
-                            Segment {
-                                length: 0.45,
-                                angle_min: -1.0,
-                                angle_max: 1.0,
-                                max_torque: 200.0, // Hip torque
-                                children: vec![Segment {
-                                    length: 0.45,
-                                    angle_min: -2.0,
-                                    angle_max: 0.0,
-                                    max_torque: 150.0, // Knee torque
-                                    children: vec![],
-                                }],
-                            },
-                            // Right Leg
-                            Segment {
-                                length: 0.45,
-                                angle_min: -1.0,
-                                angle_max: 1.0,
-                                max_torque: 200.0, // Hip torque
-                                children: vec![Segment {
-                                    length: 0.45,
-                                    angle_min: -2.0,
-                                    angle_max: 0.0,
-                                    max_torque: 150.0, // Knee torque
-                                    children: vec![],
-                                }],
-                            },
-                        ],
-                    },
-                    // Left Arm (Shoulder to Elbow)
-                    Segment {
-                        length: 0.3,
-                        angle_min: -1.5,
-                        angle_max: 1.5,
-                        max_torque: 80.0, // Shoulder torque
+                        length: 0.4,
+                        angle_min: -1.0,
+                        angle_max: 1.0,
+                        max_torque: 20.0,
                         children: vec![Segment {
-                            length: 0.3,
-                            angle_min: 0.0,
-                            angle_max: 2.5,
-                            max_torque: 50.0, // Elbow torque
+                            length: 0.4,
+                            angle_min: -2.0,
+                            angle_max: 0.0,
+                            max_torque: 10.0,
                             children: vec![],
                         }],
                     },
-                    // Right Arm (Shoulder to Elbow)
+                    // Right Leg
                     Segment {
-                        length: 0.3,
-                        angle_min: -1.5,
-                        angle_max: 1.5,
-                        max_torque: 80.0, // Shoulder torque
+                        length: 0.4,
+                        angle_min: -1.0,
+                        angle_max: 1.0,
+                        max_torque: 20.0,
                         children: vec![Segment {
-                            length: 0.3,
-                            angle_min: 0.0,
-                            angle_max: 2.5,
-                            max_torque: 50.0, // Elbow torque
+                            length: 0.4,
+                            angle_min: -2.0,
+                            angle_max: 0.0,
+                            max_torque: 5.0,
                             children: vec![],
                         }],
                     },
@@ -424,7 +388,7 @@ impl<B: Backend> Walker<B> {
     }
 
     pub fn initial_state(&self, batch_size: usize, device: &B::Device) -> PhysicsState<B> {
-        let mut positions = Tensor::<B, 3>::zeros([batch_size, self.n_particles, 2], device);
+        let mut positions = Tensor::zeros([batch_size, self.n_particles, 2], device);
 
         // Root start (Top of Head) at [0, 2.0]
         let root_start = Tensor::<B, 1>::from_floats([0.0, 2.0], device)
@@ -433,17 +397,13 @@ impl<B: Backend> Walker<B> {
         positions = positions.slice_assign([0..batch_size, 0..1, 0..2], root_start);
 
         let n_edges = self.init_p1.len();
-        let random_vals = Tensor::<B, 2>::random(
-            [n_edges, batch_size],
-            burn::tensor::Distribution::Default,
-            device,
-        );
+        let random_vals =
+            Tensor::random([n_edges, batch_size], burn::tensor::Distribution::Default, device);
         let eff_min = self.init_eff_min.clone().reshape([n_edges, 1]);
         let eff_max = self.init_eff_max.clone().reshape([n_edges, 1]);
         let all_angle_offsets = random_vals * (eff_max - eff_min.clone()) + eff_min;
 
-        let root_base_angle =
-            Tensor::<B, 1>::from_floats([-std::f32::consts::PI / 2.0], device).expand([batch_size]);
+        let root_base_angle = Tensor::<B, 1>::from_floats([-PI / 2.0], device).expand([batch_size]);
 
         let mut edge_angles: Vec<Tensor<B, 1>> = Vec::with_capacity(n_edges);
 
@@ -512,14 +472,14 @@ impl<B: Backend> Walker<B> {
         let pos_j = positions.clone().select(1, self.joint_idx_j.clone());
         let pos_c = positions.clone().select(1, self.joint_idx_c.clone());
 
-        let r_parent = pos_j.clone() - pos_p.clone();
-        let r_child = pos_c.clone() - pos_j.clone();
+        let r_parent = pos_j.clone() - pos_p;
+        let r_child = pos_c - pos_j.clone();
 
         let r_parent_norm = (r_parent.clone() * r_parent.clone()).sum_dim(2).sqrt().clamp_min(1e-6);
         let r_child_norm = (r_child.clone() * r_child.clone()).sum_dim(2).sqrt().clamp_min(1e-6);
 
-        let u_parent = r_parent / r_parent_norm.clone();
-        let u_child = r_child / r_child_norm.clone();
+        let u_parent = r_parent / r_parent_norm;
+        let u_child = r_child / r_child_norm;
 
         let n_joints = self.joint_pairs.len();
 
@@ -688,9 +648,9 @@ impl<B: Backend> Walker<B> {
             .bool_or(root_y.clone().greater_equal_elem(100.0))
             .bool_or(root_y.clone().equal(root_y.clone()).bool_not());
 
-        let fallen_time = state.fallen_time.clone() + self.config.time_step;
+        let next_fallen_time = state.fallen_time.clone() + self.config.time_step;
         let recovered_time = (state.fallen_time - self.config.time_step).clamp_min(0.0);
-        let fallen_time = fallen_time.mask_where(is_fallen.bool_not(), recovered_time);
+        let fallen_time = next_fallen_time.mask_where(is_fallen.bool_not(), recovered_time);
 
         PhysicsState {
             positions,

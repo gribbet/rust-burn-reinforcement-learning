@@ -77,12 +77,11 @@ impl<B: Backend> Normalizer<B> {
         let current_var = self.var.val();
         let current_count = self.count.val();
 
-        let delta = batch_mean.clone() - current_mean.clone();
-        let total_count = current_count.clone().add_scalar(batch_count);
+        let delta = batch_mean - current_mean.clone();
+        let total_count = current_count.clone() + batch_count;
         let total_count_reshaped = total_count.clone().reshape([1, 1]);
 
-        let new_mean = current_mean
-            + delta.clone() * (total_count_reshaped.clone().recip().mul_scalar(batch_count));
+        let new_mean = current_mean + delta.clone() * batch_count / total_count_reshaped.clone();
         let m_a = current_var * current_count.clone().reshape([1, 1]);
         let m_b = batch_var * batch_count;
         let m_2 = m_a
