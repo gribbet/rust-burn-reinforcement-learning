@@ -78,7 +78,7 @@ impl Default for WalkerConfig {
             friction: 1.0,
             mass_density: 20.0,
             fall_y: 1.0,
-            constraint_iterations: 4,
+            constraint_iterations: 2,
         }
     }
 }
