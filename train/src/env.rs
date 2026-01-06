@@ -97,8 +97,9 @@ impl<B: Backend> TrainingEnv<B> {
         let batch_size = next_state.positions.dims()[0];
         let root_pos_next =
             next_state.positions.clone().slice([0..batch_size, 0..1, 0..2]).squeeze_dim::<2>(1);
+        let root_y = root_pos_next.clone().slice([0..batch_size, 1..2]).squeeze_dim::<1>(1);
+        let is_currently_fallen = root_y.lower_equal_elem(self.walker.config.fall_y);
 
-        // Reward function
         let root_x_next = root_pos_next.clone().slice([0..batch_size, 0..1]).squeeze_dim::<1>(1);
         let root_x_prev = state
             .positions
@@ -108,12 +109,13 @@ impl<B: Backend> TrainingEnv<B> {
             .squeeze_dim::<1>(1);
 
         let distance = root_x_next - root_x_prev;
-        let progress = (distance.clone() * state.target_velocity.clone()) * 1.0; // Reward based on target direction
-        let progress = progress.mask_where(is_fallen.clone(), Tensor::zeros_like(&distance));
+        let progress = (distance.clone() * state.target_velocity.clone()) * 1.0;
+        let progress = progress.mask_where(is_currently_fallen, Tensor::zeros_like(&distance));
 
-        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.01; // Efficiency penalty
+        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.1; // Efficiency penalty
 
         let reward = (progress + torque_penalty).clamp(-10.0, 10.0);
+
         // Sanitize reward: replace NaN with 0.0
         let is_finite = reward.clone().equal(reward.clone());
         let reward = reward.clone().mask_where(is_finite.bool_not(), Tensor::zeros_like(&reward));

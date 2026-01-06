@@ -6,6 +6,7 @@ pub struct Segment {
     pub length: f32,
     pub angle_min: f32,
     pub angle_max: f32,
+    pub max_torque: f32,
     pub children: Vec<Segment>,
 }
 
@@ -21,22 +22,26 @@ impl Morphology {
                 length: 0.25, // Head (Top to Neck)
                 angle_min: -1e9,
                 angle_max: 1e9,
+                max_torque: 0.0,
                 children: vec![
                     // Torso (Neck to Hips)
                     Segment {
                         length: 0.6,
                         angle_min: -0.2,
                         angle_max: 0.2,
+                        max_torque: 40.0, // Neck torque
                         children: vec![
                             // Left Leg
                             Segment {
                                 length: 0.45,
                                 angle_min: -1.0,
                                 angle_max: 1.0,
+                                max_torque: 200.0, // Hip torque
                                 children: vec![Segment {
                                     length: 0.45,
                                     angle_min: -2.0,
                                     angle_max: 0.0,
+                                    max_torque: 150.0, // Knee torque
                                     children: vec![],
                                 }],
                             },
@@ -45,10 +50,12 @@ impl Morphology {
                                 length: 0.45,
                                 angle_min: -1.0,
                                 angle_max: 1.0,
+                                max_torque: 200.0, // Hip torque
                                 children: vec![Segment {
                                     length: 0.45,
                                     angle_min: -2.0,
                                     angle_max: 0.0,
+                                    max_torque: 150.0, // Knee torque
                                     children: vec![],
                                 }],
                             },
@@ -59,10 +66,12 @@ impl Morphology {
                         length: 0.3,
                         angle_min: -1.5,
                         angle_max: 1.5,
+                        max_torque: 80.0, // Shoulder torque
                         children: vec![Segment {
                             length: 0.3,
                             angle_min: 0.0,
                             angle_max: 2.5,
+                            max_torque: 50.0, // Elbow torque
                             children: vec![],
                         }],
                     },
@@ -71,10 +80,12 @@ impl Morphology {
                         length: 0.3,
                         angle_min: -1.5,
                         angle_max: 1.5,
+                        max_torque: 80.0, // Shoulder torque
                         children: vec![Segment {
                             length: 0.3,
                             angle_min: 0.0,
                             angle_max: 2.5,
+                            max_torque: 50.0, // Elbow torque
                             children: vec![],
                         }],
                     },
@@ -89,7 +100,6 @@ pub struct WalkerConfig {
     pub morphology: Morphology,
     pub time_step: f32,
     pub friction: f32,
-    pub torque_magnitude: f32,
     pub mass_density: f32,
     pub fall_y: f32,
     pub constraint_iterations: usize,
@@ -102,10 +112,9 @@ impl Default for WalkerConfig {
             morphology: Morphology::humanoid(),
             time_step: 1.0 / 60.0,
             friction: 1.0,
-            torque_magnitude: 20.0,
-            mass_density: 5.0,
-            fall_y: 0.75,
-            constraint_iterations: 2,
+            mass_density: 20.0,
+            fall_y: 1.0,
+            constraint_iterations: 4,
         }
     }
 }
@@ -151,6 +160,7 @@ pub struct Walker<B: Backend> {
 
     pub joint_parent_lengths: Tensor<B, 3>,
     pub joint_child_lengths: Tensor<B, 3>,
+    pub joint_max_torques: Tensor<B, 3>,
 
     pub masses: Tensor<B, 1>,
     pub inv_masses: Tensor<B, 1>,
@@ -190,6 +200,7 @@ impl<B: Backend> Walker<B> {
         let mut joint_limits = Vec::new();
         let mut joint_parent_lengths_vec = Vec::new();
         let mut joint_child_lengths_vec = Vec::new();
+        let mut joint_max_torques_vec = Vec::new();
 
         // First pass: count particles and build structure
         fn count_segments(seg: &Segment) -> usize {
@@ -235,6 +246,7 @@ impl<B: Backend> Walker<B> {
                 joint_limits.push((seg.angle_min, seg.angle_max));
                 joint_parent_lengths_vec.push(init_lengths[parent_edge_idx]);
                 joint_child_lengths_vec.push(seg.length);
+                joint_max_torques_vec.push(seg.max_torque);
             }
 
             for child in &seg.children {
@@ -284,6 +296,9 @@ impl<B: Backend> Walker<B> {
                 .reshape([1, n_joints, 1]);
         let joint_child_lengths =
             Tensor::<B, 1>::from_floats(joint_child_lengths_vec.as_slice(), device)
+                .reshape([1, n_joints, 1]);
+        let joint_max_torques =
+            Tensor::<B, 1>::from_floats(joint_max_torques_vec.as_slice(), device)
                 .reshape([1, n_joints, 1]);
 
         let mut joint_map_p_data = vec![0.0; n_particles * n_joints];
@@ -376,6 +391,7 @@ impl<B: Backend> Walker<B> {
             joint_angle_max,
             joint_parent_lengths,
             joint_child_lengths,
+            joint_max_torques,
             masses,
             inv_masses,
             n_particles,
@@ -410,8 +426,8 @@ impl<B: Backend> Walker<B> {
     pub fn initial_state(&self, batch_size: usize, device: &B::Device) -> PhysicsState<B> {
         let mut positions = Tensor::<B, 3>::zeros([batch_size, self.n_particles, 2], device);
 
-        // Root start (Top of Head) at [0, 1.8]
-        let root_start = Tensor::<B, 1>::from_floats([0.0, 2.5], device)
+        // Root start (Top of Head) at [0, 2.0]
+        let root_start = Tensor::<B, 1>::from_floats([0.0, 2.0], device)
             .reshape([1, 1, 2])
             .expand([batch_size, 1, 2]);
         positions = positions.slice_assign([0..batch_size, 0..1, 0..2], root_start);
@@ -526,8 +542,9 @@ impl<B: Backend> Walker<B> {
         let torque = action.unsqueeze_dim::<3>(2); // [B, n_joints, 1]
 
         let f_parent_mag =
-            torque.clone() / self.joint_parent_lengths.clone() * self.config.torque_magnitude;
-        let f_child_mag = torque / self.joint_child_lengths.clone() * self.config.torque_magnitude;
+            torque.clone() / self.joint_parent_lengths.clone() * self.joint_max_torques.clone();
+        let f_child_mag =
+            torque / self.joint_child_lengths.clone() * self.joint_max_torques.clone();
 
         let f_child = perp_child * f_child_mag;
         let f_parent = perp_parent * f_parent_mag;
@@ -671,8 +688,9 @@ impl<B: Backend> Walker<B> {
             .bool_or(root_y.clone().greater_equal_elem(100.0))
             .bool_or(root_y.clone().equal(root_y.clone()).bool_not());
 
-        let fallen_time = (state.fallen_time + self.config.time_step)
-            .mask_where(is_fallen.bool_not(), Tensor::zeros([batch_size], &positions.device()));
+        let fallen_time = state.fallen_time.clone() + self.config.time_step;
+        let recovered_time = (state.fallen_time - self.config.time_step).clamp_min(0.0);
+        let fallen_time = fallen_time.mask_where(is_fallen.bool_not(), recovered_time);
 
         PhysicsState {
             positions,
