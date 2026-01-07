@@ -634,11 +634,6 @@ impl<B: Backend> Walker<B> {
         velocities = (predicted.clone() - positions) / self.config.time_step;
         positions = predicted;
 
-        let root_y = positions
-            .clone()
-            .slice([0..batch_size, 0..1, 1..2])
-            .squeeze_dim::<2>(1)
-            .squeeze_dim::<1>(1);
         PhysicsState {
             positions,
             velocities,
