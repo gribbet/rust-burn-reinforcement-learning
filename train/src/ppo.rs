@@ -17,7 +17,7 @@ use std::time::Instant;
 
 #[derive(Config, Debug)]
 pub struct ProximalPolicyOptimizationConfig {
-    #[config(default = 2048)]
+    #[config(default = 1024)]
     pub environments_count: usize,
     #[config(default = 128)]
     pub rollout_length: usize,
@@ -27,15 +27,15 @@ pub struct ProximalPolicyOptimizationConfig {
     pub generalized_advantage_estimation_lambda: f32,
     #[config(default = 0.2)]
     pub proximal_policy_optimization_clip: f32,
-    #[config(default = 0.05)]
+    #[config(default = 0.01)]
     pub entropy_coefficient: f32,
     #[config(default = 0.5)]
     pub value_coefficient: f32,
-    #[config(default = 1e-4)]
+    #[config(default = 3e-4)]
     pub learning_rate: f64,
     #[config(default = 4)]
     pub update_epochs: usize,
-    #[config(default = 16)]
+    #[config(default = 32)]
     pub minibatches: usize,
     #[config(default = 0.5)]
     pub max_grad_norm: f32,
@@ -174,18 +174,9 @@ pub fn train<B: AutodiffBackend>(
                     &config,
                 );
 
-                // Check if loss is finite before backward pass
-                let is_finite =
-                    loss.clone().equal(loss.clone()).all().into_data().as_slice::<bool>().unwrap()
-                        [0];
-
-                if is_finite {
-                    let grads = loss.backward();
-                    let grads = GradientsParams::from_grads(grads, &agent);
-                    agent = optimizer.step(learning_rate, agent, grads);
-                } else {
-                    println!("Skipping update due to non-finite loss");
-                }
+                let grads = loss.backward();
+                let grads = GradientsParams::from_grads(grads, &agent);
+                agent = optimizer.step(learning_rate, agent, grads);
             }
         }
 

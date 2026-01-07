@@ -76,7 +76,7 @@ impl Default for WalkerConfig {
             morphology: Morphology::humanoid(),
             time_step: 1.0 / 60.0,
             friction: 1.0,
-            mass_density: 20.0,
+            mass_density: 5.0,
             fall_y: 1.0,
             constraint_iterations: 2,
         }
@@ -89,7 +89,6 @@ pub struct PhysicsState<B: Backend> {
     pub velocities: Tensor<B, 3>, // [batch, n_particles, 2]
     pub time: Tensor<B, 1>,
     pub target_velocity: Tensor<B, 1>,
-    pub fallen_time: Tensor<B, 1>,
 }
 
 pub struct Walker<B: Backend> {
@@ -436,9 +435,8 @@ impl<B: Backend> Walker<B> {
         let velocities = Tensor::zeros([batch_size, self.n_particles, 2], device);
         let time = Tensor::zeros([batch_size], device);
         let target_velocity = Tensor::zeros([batch_size], device);
-        let fallen_time = Tensor::zeros([batch_size], device);
 
-        PhysicsState { positions, velocities, time, target_velocity, fallen_time }
+        PhysicsState { positions, velocities, time, target_velocity }
     }
 
     pub fn get_observation(&self, state: &PhysicsState<B>) -> Tensor<B, 2> {
@@ -641,23 +639,11 @@ impl<B: Backend> Walker<B> {
             .slice([0..batch_size, 0..1, 1..2])
             .squeeze_dim::<2>(1)
             .squeeze_dim::<1>(1);
-        // Fall if too low, too high (explosion), or NaN
-        let is_fallen = root_y
-            .clone()
-            .lower_equal_elem(self.config.fall_y)
-            .bool_or(root_y.clone().greater_equal_elem(100.0))
-            .bool_or(root_y.clone().equal(root_y.clone()).bool_not());
-
-        let next_fallen_time = state.fallen_time.clone() + self.config.time_step;
-        let recovered_time = (state.fallen_time - self.config.time_step).clamp_min(0.0);
-        let fallen_time = next_fallen_time.mask_where(is_fallen.bool_not(), recovered_time);
-
         PhysicsState {
             positions,
             velocities,
             time: state.time + self.config.time_step,
             target_velocity: state.target_velocity,
-            fallen_time,
         }
     }
 }
