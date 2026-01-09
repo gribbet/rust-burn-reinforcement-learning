@@ -77,7 +77,7 @@ fn draw_simulation<B: Backend>(state: &PhysicsState<B>, walker: &Walker<B>) {
     let scale = 50.0;
 
     let ground_y = screen_h * 0.8;
-    let draw_x_offset = screen_w / 2.0;
+    let draw_x_offset = screen_w / 8.0;
 
     // Ground
     draw_line(0.0, ground_y, screen_w, ground_y, 2.0, BLACK);
