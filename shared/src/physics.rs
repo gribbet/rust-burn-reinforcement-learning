@@ -6,10 +6,15 @@ use std::f32::consts::PI;
 pub struct Segment {
     pub length: f32,
     pub mass: f32,
+    pub joints: Vec<Joint>,
+}
+
+#[derive(Clone, Debug)]
+pub struct Joint {
     pub angle_min: f32,
     pub angle_max: f32,
     pub max_torque: f32,
-    pub children: Vec<Segment>,
+    pub child: Segment,
 }
 
 #[derive(Clone, Debug)]
@@ -23,83 +28,90 @@ impl Morphology {
             root: Segment {
                 length: 0.2, // Head
                 mass: 5.0,
-                angle_min: 0.0,
-                angle_max: 0.0,
-                max_torque: 0.0,
-                children: vec![
+                joints: vec![
                     // Torso
-                    Segment {
-                        length: 0.6,
-                        mass: 35.0,
+                    Joint {
                         angle_min: -0.1, // Slight lean back
                         angle_max: 0.8,  // Lean forward into the walk
                         max_torque: 150.0,
-                        children: vec![
-                            // Left Leg
-                            Segment {
-                                length: 0.4,
-                                mass: 10.0,
-                                angle_min: -0.7, // Swing back
-                                angle_max: 1.4,  // Swing forward (right)
-                                max_torque: 120.0,
-                                children: vec![Segment {
-                                    length: 0.4,
-                                    mass: 3.5,
-                                    angle_min: -2.3, // Knee bend (backwards)
-                                    angle_max: 0.0,  // Straight
-                                    max_torque: 80.0,
-                                    children: vec![],
-                                }],
-                            },
-                            // Right Leg
-                            Segment {
-                                length: 0.4,
-                                mass: 10.0,
-                                angle_min: -0.7,
-                                angle_max: 1.4,
-                                max_torque: 120.0,
-                                children: vec![Segment {
-                                    length: 0.4,
-                                    mass: 3.5,
-                                    angle_min: -2.3,
-                                    angle_max: 0.0,
-                                    max_torque: 80.0,
-                                    children: vec![],
-                                }],
-                            },
-                        ],
+                        child: Segment {
+                            length: 0.6,
+                            mass: 35.0,
+                            joints: vec![
+                                // Left Leg
+                                Joint {
+                                    angle_min: -0.7, // Swing back
+                                    angle_max: 1.4,  // Swing forward (right)
+                                    max_torque: 120.0,
+                                    child: Segment {
+                                        length: 0.4,
+                                        mass: 10.0,
+                                        joints: vec![Joint {
+                                            angle_min: -2.3, // Knee bend (backwards)
+                                            angle_max: 0.0,  // Straight
+                                            max_torque: 80.0,
+                                            child: Segment {
+                                                length: 0.4,
+                                                mass: 3.5,
+                                                joints: vec![],
+                                            },
+                                        }],
+                                    },
+                                },
+                                // Right Leg
+                                Joint {
+                                    angle_min: -0.7,
+                                    angle_max: 1.4,
+                                    max_torque: 120.0,
+                                    child: Segment {
+                                        length: 0.4,
+                                        mass: 10.0,
+                                        joints: vec![Joint {
+                                            angle_min: -2.3,
+                                            angle_max: 0.0,
+                                            max_torque: 80.0,
+                                            child: Segment {
+                                                length: 0.4,
+                                                mass: 3.5,
+                                                joints: vec![],
+                                            },
+                                        }],
+                                    },
+                                },
+                            ],
+                        },
                     },
                     // Left Arm
-                    Segment {
-                        length: 0.3,
-                        mass: 2.5,
+                    Joint {
                         angle_min: -1.2,
                         angle_max: 1.2,
                         max_torque: 20.0,
-                        children: vec![Segment {
+                        child: Segment {
                             length: 0.3,
-                            mass: 1.5,
-                            angle_min: 0.0,
-                            angle_max: 2.2, // Elbow bend forward
-                            max_torque: 10.0,
-                            children: vec![],
-                        }],
+                            mass: 2.5,
+                            joints: vec![Joint {
+                                angle_min: 0.0,
+                                angle_max: 2.2, // Elbow bend forward
+                                max_torque: 10.0,
+                                child: Segment { length: 0.3, mass: 1.5, joints: vec![] },
+                            }],
+                        },
                     },
                     // Right Arm
-                    Segment {
-                        length: 0.3,
-                        mass: 2.5,
+                    Joint {
                         angle_min: -1.2,
                         angle_max: 1.2,
                         max_torque: 20.0,
-                        children: vec![Segment {
+                        child: Segment {
                             length: 0.3,
-                            mass: 1.5,
-                            angle_min: 0.0,
-                            angle_max: 2.2,
-                            max_torque: 10.0,
-                            children: vec![],
-                        }],
+                            mass: 2.5,
+                            joints: vec![Joint {
+                                angle_min: 0.0,
+                                angle_max: 2.2,
+                                max_torque: 10.0,
+                                child: Segment { length: 0.3, mass: 1.5, joints: vec![] },
+                            }],
+                        },
                     },
                 ],
             },
@@ -212,7 +224,7 @@ impl<B: Backend> Walker<B> {
 
         // First pass: count particles and build structure
         fn count_segments(seg: &Segment) -> usize {
-            1 + seg.children.iter().map(count_segments).sum::<usize>()
+            1 + seg.joints.iter().map(|j| count_segments(&j.child)).sum::<usize>()
         }
         let n_segments = count_segments(&config.morphology.root);
         let n_particles = n_segments + 1;
@@ -225,11 +237,11 @@ impl<B: Backend> Walker<B> {
         let mut init_angle_max = Vec::new();
         let mut init_parent_edge = Vec::new();
 
-        // Stack for DFS: (segment, start_node_idx, parent_start_node_idx, parent_edge_idx)
-        let mut stack = vec![(&config.morphology.root, 0usize, None::<usize>)];
+        // Stack for DFS: (segment, start_node_idx, parent_edge_idx, optional_joint_info)
+        let mut stack = vec![(&config.morphology.root, 0usize, None::<usize>, None::<&Joint>)];
         let mut next_particle_id = 1;
 
-        while let Some((seg, start_idx, parent_edge_opt)) = stack.pop() {
+        while let Some((seg, start_idx, parent_edge_opt, joint_opt)) = stack.pop() {
             let end_idx = next_particle_id;
             let current_edge_idx = init_p1.len();
             next_particle_id += 1;
@@ -239,26 +251,29 @@ impl<B: Backend> Walker<B> {
             init_p1.push(start_idx);
             init_p2.push(end_idx);
             init_lengths.push(seg.length);
-            init_angle_min.push(seg.angle_min);
-            init_angle_max.push(seg.angle_max);
+
+            // Extract joint properties or defaults for root
+            let (amin, amax) = joint_opt.map(|j| (j.angle_min, j.angle_max)).unwrap_or((-PI, PI));
+            init_angle_min.push(amin);
+            init_angle_max.push(amax);
             init_parent_edge.push(parent_edge_opt);
 
             let seg_mass = seg.mass;
             masses_vec[start_idx] += seg_mass * 0.5;
             masses_vec[end_idx] += seg_mass * 0.5;
 
-            if let Some(parent_edge_idx) = parent_edge_opt {
+            if let (Some(parent_edge_idx), Some(joint)) = (parent_edge_opt, joint_opt) {
                 let parent_start = init_p1[parent_edge_idx];
                 // Joint at start_idx
                 joint_pairs.push((parent_start, start_idx, end_idx));
-                joint_limits.push((seg.angle_min, seg.angle_max));
+                joint_limits.push((joint.angle_min, joint.angle_max));
                 joint_parent_lengths_vec.push(init_lengths[parent_edge_idx]);
                 joint_child_lengths_vec.push(seg.length);
-                joint_max_torques_vec.push(seg.max_torque);
+                joint_max_torques_vec.push(joint.max_torque);
             }
 
-            for child in &seg.children {
-                stack.push((child, end_idx, Some(current_edge_idx)));
+            for joint in &seg.joints {
+                stack.push((&joint.child, end_idx, Some(current_edge_idx), Some(joint)));
             }
         }
 

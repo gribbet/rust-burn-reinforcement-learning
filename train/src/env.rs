@@ -103,7 +103,7 @@ impl<B: Backend> TrainingEnv<B> {
         let distance = com_x_next.clone() - com_x_prev;
         let progress = distance * 1.0;
 
-        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.005; // Increased efficiency penalty
+        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.002; // Increased efficiency penalty
 
         let reward = progress + torque_penalty;
 
