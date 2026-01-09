@@ -28,7 +28,7 @@ impl Morphology {
                     // Torso
                     Joint {
                         angle_min: -0.1, // Slight lean back
-                        angle_max: 0.8,  // Lean forward into the walk
+                        angle_max: 0.4,  // Lean forward
                         max_torque: 150.0,
                         child: Segment {
                             length: 0.6,
@@ -36,14 +36,14 @@ impl Morphology {
                             joints: vec![
                                 // Left Leg
                                 Joint {
-                                    angle_min: -0.7, // Swing back
-                                    angle_max: 1.4,  // Swing forward (right)
+                                    angle_min: -0.25, // Swing back
+                                    angle_max: 1.0,   // Swing forward
                                     max_torque: 120.0,
                                     child: Segment {
                                         length: 0.4,
                                         mass: 10.0,
                                         joints: vec![Joint {
-                                            angle_min: -2.3, // Knee bend (backwards)
+                                            angle_min: -1.8, // Knee bend
                                             angle_max: 0.0,  // Straight
                                             max_torque: 80.0,
                                             child: Segment {
@@ -56,14 +56,14 @@ impl Morphology {
                                 },
                                 // Right Leg
                                 Joint {
-                                    angle_min: -0.7,
-                                    angle_max: 1.4,
+                                    angle_min: -0.25,
+                                    angle_max: 1.0,
                                     max_torque: 120.0,
                                     child: Segment {
                                         length: 0.4,
                                         mass: 10.0,
                                         joints: vec![Joint {
-                                            angle_min: -2.3,
+                                            angle_min: -1.8,
                                             angle_max: 0.0,
                                             max_torque: 80.0,
                                             child: Segment {
@@ -79,15 +79,15 @@ impl Morphology {
                     },
                     // Left Arm
                     Joint {
-                        angle_min: -1.2,
-                        angle_max: 1.2,
+                        angle_min: -0.8,
+                        angle_max: 0.8,
                         max_torque: 20.0,
                         child: Segment {
                             length: 0.3,
                             mass: 2.5,
                             joints: vec![Joint {
                                 angle_min: 0.0,
-                                angle_max: 2.2, // Elbow bend forward
+                                angle_max: 1.8, // Elbow bend forward
                                 max_torque: 10.0,
                                 child: Segment { length: 0.3, mass: 1.5, joints: vec![] },
                             }],
@@ -95,15 +95,15 @@ impl Morphology {
                     },
                     // Right Arm
                     Joint {
-                        angle_min: -1.2,
-                        angle_max: 1.2,
+                        angle_min: -0.8,
+                        angle_max: 0.8,
                         max_torque: 20.0,
                         child: Segment {
                             length: 0.3,
                             mass: 2.5,
                             joints: vec![Joint {
                                 angle_min: 0.0,
-                                angle_max: 2.2,
+                                angle_max: 1.8,
                                 max_torque: 10.0,
                                 child: Segment { length: 0.3, mass: 1.5, joints: vec![] },
                             }],
