@@ -23,8 +23,8 @@ impl Morphology {
             root: Segment {
                 length: 0.2, // Head
                 mass: 5.0,
-                angle_min: -1e9,
-                angle_max: 1e9,
+                angle_min: 0.0,
+                angle_max: 0.0,
                 max_torque: 0.0,
                 children: vec![
                     // Torso
@@ -123,7 +123,7 @@ impl Default for WalkerConfig {
             morphology: Morphology::humanoid(),
             time_step: 1.0 / 60.0,
             friction: 1.0,
-            fall_y: 1.1,
+            fall_y: 1.3,
             constraint_iterations: 4,
         }
     }
@@ -145,24 +145,14 @@ pub struct Walker<B: Backend> {
     pub edge_idx_1: Tensor<B, 1, Int>,
     pub edge_idx_2: Tensor<B, 1, Int>,
     pub edge_lengths: Tensor<B, 1>,
-    pub edge_map_1: Tensor<B, 2>,
-    pub edge_map_2: Tensor<B, 2>,
+
+    // Simplified mapping tensors
+    pub edge_map_combined: Tensor<B, 3>,
+    pub joint_map_combined: Tensor<B, 3>,
 
     pub joint_idx_p: Tensor<B, 1, Int>,
     pub joint_idx_j: Tensor<B, 1, Int>,
     pub joint_idx_c: Tensor<B, 1, Int>,
-    pub joint_map_p: Tensor<B, 2>,
-    pub joint_map_j: Tensor<B, 2>,
-    pub joint_map_c: Tensor<B, 2>,
-
-    pub joint_map_p_3d: Tensor<B, 3>,
-    pub joint_map_j_3d: Tensor<B, 3>,
-    pub joint_map_c_3d: Tensor<B, 3>,
-    pub edge_map_1_3d: Tensor<B, 3>,
-    pub edge_map_2_3d: Tensor<B, 3>,
-
-    pub joint_map_combined: Tensor<B, 3>,
-    pub edge_map_combined: Tensor<B, 3>,
 
     pub joint_angle_min: Tensor<B, 1>,
     pub joint_angle_max: Tensor<B, 1>,
@@ -335,18 +325,9 @@ impl<B: Backend> Walker<B> {
         let joint_map_c = Tensor::<B, 1>::from_floats(joint_map_c_data.as_slice(), device)
             .reshape([n_particles, n_joints]);
 
-        let joint_map_p_3d = joint_map_p.clone().unsqueeze::<3>();
-        let joint_map_j_3d = joint_map_j.clone().unsqueeze::<3>();
-        let joint_map_c_3d = joint_map_c.clone().unsqueeze::<3>();
-        let edge_map_1_3d = edge_map_1.clone().unsqueeze::<3>();
-        let edge_map_2_3d = edge_map_2.clone().unsqueeze::<3>();
-
-        let joint_map_combined = Tensor::cat(
-            vec![joint_map_p_3d.clone(), joint_map_j_3d.clone(), joint_map_c_3d.clone()],
-            2,
-        );
-        let edge_map_combined =
-            Tensor::cat(vec![edge_map_1_3d.clone(), edge_map_2_3d.clone().neg()], 2);
+        let joint_map_combined =
+            Tensor::cat(vec![joint_map_p, joint_map_j, joint_map_c], 1).unsqueeze::<3>();
+        let edge_map_combined = Tensor::cat(vec![edge_map_1, edge_map_2.neg()], 1).unsqueeze::<3>();
 
         let joint_angle_min_vec: Vec<f32> = joint_limits.iter().map(|l| l.0).collect();
         let joint_angle_max_vec: Vec<f32> = joint_limits.iter().map(|l| l.1).collect();
@@ -390,21 +371,11 @@ impl<B: Backend> Walker<B> {
             edge_idx_1,
             edge_idx_2,
             edge_lengths,
-            edge_map_1,
-            edge_map_2,
+            edge_map_combined,
             joint_idx_p,
             joint_idx_j,
             joint_idx_c,
-            joint_map_p,
-            joint_map_j,
-            joint_map_c,
-            joint_map_p_3d,
-            joint_map_j_3d,
-            joint_map_c_3d,
-            edge_map_1_3d,
-            edge_map_2_3d,
             joint_map_combined,
-            edge_map_combined,
             joint_angle_min,
             joint_angle_max,
             joint_parent_lengths,
@@ -444,7 +415,7 @@ impl<B: Backend> Walker<B> {
     pub fn initial_state(&self, batch_size: usize, device: &B::Device) -> PhysicsState<B> {
         let mut positions = Tensor::zeros([batch_size, self.n_particles, 2], device);
 
-        // Root start (Top of Head) at [0, 2.0]
+        // Root start (Top of Head) at [0, 1.6]
         let root_start = Tensor::<B, 1>::from_floats([0.0, 1.6], device)
             .reshape([1, 1, 2])
             .expand([batch_size, 1, 2]);
