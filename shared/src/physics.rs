@@ -44,7 +44,9 @@ pub struct Walker<B: Backend> {
 
     // Simplified mapping tensors
     pub edge_map_combined: Tensor<B, 3>,
+    pub edge_map_combined_transpose: Tensor<B, 3>,
     pub joint_map_combined: Tensor<B, 3>,
+    pub joint_map_combined_transpose: Tensor<B, 3>,
 
     pub joint_idx_p: Tensor<B, 1, Int>,
     pub joint_idx_j: Tensor<B, 1, Int>,
@@ -181,13 +183,13 @@ impl<B: Backend> Walker<B> {
         let mut edge_map_1_data = vec![0.0; n_particles * n_edges];
         let mut edge_map_2_data = vec![0.0; n_particles * n_edges];
         for (i, &(p1, p2, _)) in edges.iter().enumerate() {
-            edge_map_1_data[p1 * n_edges + i] = 1.0;
-            edge_map_2_data[p2 * n_edges + i] = 1.0;
+            edge_map_1_data[i * n_particles + p1] = 1.0;
+            edge_map_2_data[i * n_particles + p2] = 1.0;
         }
         let edge_map_1 = Tensor::<B, 1>::from_floats(edge_map_1_data.as_slice(), device)
-            .reshape([n_particles, n_edges]);
+            .reshape([n_edges, n_particles]);
         let edge_map_2 = Tensor::<B, 1>::from_floats(edge_map_2_data.as_slice(), device)
-            .reshape([n_particles, n_edges]);
+            .reshape([n_edges, n_particles]);
 
         // Joints
         let joint_idx_p_vec: Vec<i32> = joint_pairs.iter().map(|j| j.0 as i32).collect();
@@ -213,20 +215,23 @@ impl<B: Backend> Walker<B> {
         let mut joint_map_c_data = vec![0.0; n_particles * n_joints];
 
         for (i, &(p, j, c)) in joint_pairs.iter().enumerate() {
-            joint_map_p_data[p * n_joints + i] = 1.0;
-            joint_map_j_data[j * n_joints + i] = 1.0;
-            joint_map_c_data[c * n_joints + i] = 1.0;
+            joint_map_p_data[i * n_particles + p] = 1.0;
+            joint_map_j_data[i * n_particles + j] = 1.0;
+            joint_map_c_data[i * n_particles + c] = 1.0;
         }
         let joint_map_p = Tensor::<B, 1>::from_floats(joint_map_p_data.as_slice(), device)
-            .reshape([n_particles, n_joints]);
+            .reshape([n_joints, n_particles]);
         let joint_map_j = Tensor::<B, 1>::from_floats(joint_map_j_data.as_slice(), device)
-            .reshape([n_particles, n_joints]);
+            .reshape([n_joints, n_particles]);
         let joint_map_c = Tensor::<B, 1>::from_floats(joint_map_c_data.as_slice(), device)
-            .reshape([n_particles, n_joints]);
+            .reshape([n_joints, n_particles]);
 
         let joint_map_combined =
-            Tensor::cat(vec![joint_map_p, joint_map_j, joint_map_c], 1).unsqueeze::<3>();
-        let edge_map_combined = Tensor::cat(vec![edge_map_1, edge_map_2.neg()], 1).unsqueeze::<3>();
+            Tensor::cat(vec![joint_map_p, joint_map_j, joint_map_c], 0).unsqueeze::<3>();
+        let edge_map_combined = Tensor::cat(vec![edge_map_1, edge_map_2.neg()], 0).unsqueeze::<3>();
+
+        let joint_map_combined_transpose = joint_map_combined.clone().transpose();
+        let edge_map_combined_transpose = edge_map_combined.clone().transpose();
 
         let joint_angle_min_vec: Vec<f32> = joint_limits.iter().map(|l| l.0).collect();
         let joint_angle_max_vec: Vec<f32> = joint_limits.iter().map(|l| l.1).collect();
@@ -271,10 +276,12 @@ impl<B: Backend> Walker<B> {
             edge_idx_2,
             edge_lengths,
             edge_map_combined,
+            edge_map_combined_transpose,
             joint_idx_p,
             joint_idx_j,
             joint_idx_c,
             joint_map_combined,
+            joint_map_combined_transpose,
             joint_angle_min,
             joint_angle_max,
             joint_parent_lengths,
@@ -437,7 +444,7 @@ impl<B: Backend> Walker<B> {
         let f_joint = (f_child.clone() + f_parent.clone()).neg();
 
         let combined_forces = Tensor::cat(vec![f_parent, f_joint, f_child], 1);
-        let actuation_forces = self.joint_map_combined.clone().matmul(combined_forces);
+        let actuation_forces = self.joint_map_combined_transpose.clone().matmul(combined_forces);
 
         acc = acc + actuation_forces * self.inv_masses_reshaped.clone();
 
@@ -462,7 +469,8 @@ impl<B: Backend> Walker<B> {
             let c2 = correction * (self.edge_w2.clone() / self.edge_w_sum.clone());
 
             let combined_corrections = Tensor::cat(vec![c1, c2], 1);
-            let correction_total = self.edge_map_combined.clone().matmul(combined_corrections);
+            let correction_total =
+                self.edge_map_combined_transpose.clone().matmul(combined_corrections);
             predicted = predicted + correction_total;
 
             // --- Angular Constraints (XPBD) ---
@@ -532,7 +540,8 @@ impl<B: Backend> Walker<B> {
             let dj = grad_j * delta_lambda.clone() * self.joint_w_j.clone();
 
             let combined_corrections = Tensor::cat(vec![dp, dj, dc], 1);
-            let correction_total = self.joint_map_combined.clone().matmul(combined_corrections);
+            let correction_total =
+                self.joint_map_combined_transpose.clone().matmul(combined_corrections);
 
             predicted = predicted + correction_total;
 

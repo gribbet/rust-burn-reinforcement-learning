@@ -295,8 +295,6 @@ fn collect_rollout<B: AutodiffBackend>(
         device,
     );
 
-    let (reset_observation, reset_state) = environment.reset(environments_count, device);
-
     let mut observation = observation_outer.clone().inner();
     let mut state = EnvironmentState::inner(state_outer.clone());
 
@@ -341,12 +339,12 @@ fn collect_rollout<B: AutodiffBackend>(
         observation = step.observation;
         state = step.state;
 
+        let (reset_observation, reset_state) = environment.reset(environments_count, device);
+
         let dims = observation.dims();
-        observation = observation.mask_where(
-            is_done.clone().unsqueeze_dim::<2>(1).expand(dims),
-            reset_observation.clone(),
-        );
-        state = state.mask_where(is_done, reset_state.clone());
+        observation = observation
+            .mask_where(is_done.clone().unsqueeze_dim::<2>(1).expand(dims), reset_observation);
+        state = state.mask_where(is_done, reset_state);
     }
 
     if compute_metrics {
