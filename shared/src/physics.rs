@@ -5,6 +5,7 @@ use std::f32::consts::PI;
 #[derive(Clone, Debug)]
 pub struct Segment {
     pub length: f32,
+    pub mass: f32,
     pub angle_min: f32,
     pub angle_max: f32,
     pub max_torque: f32,
@@ -20,36 +21,83 @@ impl Morphology {
     pub fn humanoid() -> Self {
         Self {
             root: Segment {
-                length: 0.6, // Torso
+                length: 0.2, // Head
+                mass: 5.0,
                 angle_min: -1e9,
                 angle_max: 1e9,
                 max_torque: 0.0,
                 children: vec![
-                    // Left Leg
+                    // Torso
                     Segment {
-                        length: 0.4,
-                        angle_min: -1.0,
-                        angle_max: 1.0,
-                        max_torque: 100.0,
+                        length: 0.6,
+                        mass: 35.0,
+                        angle_min: -0.1, // Slight lean back
+                        angle_max: 0.8,  // Lean forward into the walk
+                        max_torque: 150.0,
+                        children: vec![
+                            // Left Leg
+                            Segment {
+                                length: 0.4,
+                                mass: 10.0,
+                                angle_min: -0.7, // Swing back
+                                angle_max: 1.4,  // Swing forward (right)
+                                max_torque: 120.0,
+                                children: vec![Segment {
+                                    length: 0.4,
+                                    mass: 3.5,
+                                    angle_min: -2.3, // Knee bend (backwards)
+                                    angle_max: 0.0,  // Straight
+                                    max_torque: 80.0,
+                                    children: vec![],
+                                }],
+                            },
+                            // Right Leg
+                            Segment {
+                                length: 0.4,
+                                mass: 10.0,
+                                angle_min: -0.7,
+                                angle_max: 1.4,
+                                max_torque: 120.0,
+                                children: vec![Segment {
+                                    length: 0.4,
+                                    mass: 3.5,
+                                    angle_min: -2.3,
+                                    angle_max: 0.0,
+                                    max_torque: 80.0,
+                                    children: vec![],
+                                }],
+                            },
+                        ],
+                    },
+                    // Left Arm
+                    Segment {
+                        length: 0.3,
+                        mass: 2.5,
+                        angle_min: -1.2,
+                        angle_max: 1.2,
+                        max_torque: 20.0,
                         children: vec![Segment {
-                            length: 0.4,
-                            angle_min: -2.0,
-                            angle_max: 0.0,
-                            max_torque: 50.0,
+                            length: 0.3,
+                            mass: 1.5,
+                            angle_min: 0.0,
+                            angle_max: 2.2, // Elbow bend forward
+                            max_torque: 10.0,
                             children: vec![],
                         }],
                     },
-                    // Right Leg
+                    // Right Arm
                     Segment {
-                        length: 0.4,
-                        angle_min: -1.0,
-                        angle_max: 1.0,
-                        max_torque: 100.0,
+                        length: 0.3,
+                        mass: 2.5,
+                        angle_min: -1.2,
+                        angle_max: 1.2,
+                        max_torque: 20.0,
                         children: vec![Segment {
-                            length: 0.4,
-                            angle_min: -2.0,
-                            angle_max: 0.0,
-                            max_torque: 50.0,
+                            length: 0.3,
+                            mass: 1.5,
+                            angle_min: 0.0,
+                            angle_max: 2.2,
+                            max_torque: 10.0,
                             children: vec![],
                         }],
                     },
@@ -64,7 +112,6 @@ pub struct WalkerConfig {
     pub morphology: Morphology,
     pub time_step: f32,
     pub friction: f32,
-    pub mass_density: f32,
     pub fall_y: f32,
     pub constraint_iterations: usize,
 }
@@ -76,9 +123,8 @@ impl Default for WalkerConfig {
             morphology: Morphology::humanoid(),
             time_step: 1.0 / 60.0,
             friction: 1.0,
-            mass_density: 20.0,
-            fall_y: 1.0,
-            constraint_iterations: 2,
+            fall_y: 1.1,
+            constraint_iterations: 4,
         }
     }
 }
@@ -157,6 +203,15 @@ pub struct Walker<B: Backend> {
 }
 
 impl<B: Backend> Walker<B> {
+    pub fn center_of_mass(&self, positions: Tensor<B, 3>) -> Tensor<B, 2> {
+        let masses = self.masses.clone().reshape([1, self.n_particles, 1]);
+        let total_mass = masses.clone().sum_dim(1).squeeze_dim::<2>(1); // [1, 1] -> [1]
+
+        let weighted_pos = positions * masses;
+        let com = weighted_pos.sum_dim(1).squeeze_dim::<2>(1) / total_mass;
+        com // [batch, 2]
+    }
+
     pub fn new(config: WalkerConfig, device: &B::Device) -> Self {
         let mut edges = Vec::new();
         let mut joint_pairs = Vec::new();
@@ -198,7 +253,7 @@ impl<B: Backend> Walker<B> {
             init_angle_max.push(seg.angle_max);
             init_parent_edge.push(parent_edge_opt);
 
-            let seg_mass = seg.length * config.mass_density;
+            let seg_mass = seg.mass;
             masses_vec[start_idx] += seg_mass * 0.5;
             masses_vec[end_idx] += seg_mass * 0.5;
 
@@ -306,7 +361,7 @@ impl<B: Backend> Walker<B> {
             let parent_edge_idx = init_parent_edge[i];
 
             let (eff_min, eff_max) =
-                if parent_edge_idx.is_none() { (-0.1, 0.1) } else { (angle_min, angle_max) };
+                if parent_edge_idx.is_none() { (-0.8, 0.0) } else { (angle_min, angle_max) };
             init_eff_min_vec.push(eff_min);
             init_eff_max_vec.push(eff_max);
         }
@@ -390,7 +445,7 @@ impl<B: Backend> Walker<B> {
         let mut positions = Tensor::zeros([batch_size, self.n_particles, 2], device);
 
         // Root start (Top of Head) at [0, 2.0]
-        let root_start = Tensor::<B, 1>::from_floats([0.0, 2.0], device)
+        let root_start = Tensor::<B, 1>::from_floats([0.0, 1.6], device)
             .reshape([1, 1, 2])
             .expand([batch_size, 1, 2]);
         positions = positions.slice_assign([0..batch_size, 0..1, 0..2], root_start);
@@ -442,8 +497,11 @@ impl<B: Backend> Walker<B> {
     pub fn get_observation(&self, state: &PhysicsState<B>) -> Tensor<B, 2> {
         let batch_size = state.positions.dims()[0];
 
-        let root_pos = state.positions.clone().slice([0..batch_size, 0..1, 0..2]);
-        let rel_pos = state.positions.clone() - root_pos;
+        let com = self.center_of_mass(state.positions.clone());
+        let com_x = com.slice([0..batch_size, 0..1]).unsqueeze_dim::<3>(1);
+        let offset = Tensor::cat(vec![com_x.clone(), Tensor::zeros_like(&com_x)], 2);
+
+        let rel_pos = state.positions.clone() - offset;
 
         let flat_pos = rel_pos.reshape([batch_size, self.n_particles * 2]);
         let flat_vel = state.velocities.clone().reshape([batch_size, self.n_particles * 2]);

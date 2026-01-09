@@ -94,19 +94,16 @@ impl<B: Backend> TrainingEnv<B> {
         let root_y = root_pos_next.clone().slice([0..batch_size, 1..2]).squeeze_dim::<1>(1);
         let is_fallen = root_y.lower_equal_elem(self.walker.config.fall_y);
 
-        let root_x_next = root_pos_next.clone().slice([0..batch_size, 0..1]).squeeze_dim::<1>(1);
-        let root_x_prev = state
-            .positions
-            .clone()
-            .slice([0..batch_size, 0..1, 0..1])
-            .squeeze_dim::<2>(1)
-            .squeeze_dim::<1>(1);
+        let com_next = self.walker.center_of_mass(next_state.positions.clone());
+        let com_prev = self.walker.center_of_mass(state.positions.clone());
 
-        let distance = root_x_next - root_x_prev;
-        let progress = (distance.clone() * state.target_velocity.clone()) * 1.0;
-        let progress = progress.mask_where(is_fallen.clone(), Tensor::zeros_like(&distance));
+        let com_x_next = com_next.clone().slice([0..batch_size, 0..1]).squeeze_dim::<1>(1);
+        let com_x_prev = com_prev.clone().slice([0..batch_size, 0..1]).squeeze_dim::<1>(1);
 
-        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.0001; // Efficiency penalty
+        let distance = com_x_next.clone() - com_x_prev;
+        let progress = distance * 1.0;
+
+        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.001; // Increased efficiency penalty
 
         let reward = progress + torque_penalty;
 
@@ -115,8 +112,9 @@ impl<B: Backend> TrainingEnv<B> {
         let reward = reward.clone().mask_where(is_finite.bool_not(), Tensor::zeros_like(&reward));
 
         let is_max_time = next_state.time.clone().greater_equal_elem(self.max_time);
+        let is_goal = com_x_next.greater_equal_elem(10.0);
 
-        let done = is_fallen.clone().bool_or(is_max_time).int();
+        let done = is_fallen.clone().bool_or(is_max_time).bool_or(is_goal).int();
 
         TrainingStep {
             observation: self.walker.get_observation(&next_state),
