@@ -12,7 +12,6 @@ use burn::{
 use chrono;
 use shared::model::Agent;
 use shared::physics::PhysicsState;
-use std::f32::consts::PI;
 use std::time::Instant;
 
 #[derive(Config, Debug)]
@@ -185,12 +184,11 @@ pub fn train<B: AutodiffBackend>(
         let steps_per_second = number_of_samples as f64 / duration;
 
         if i % 10 == 0 || i == iterations - 1 {
-            // Calculate current policy entropy from the model's log_std parameter
-            // H = 0.5 * (1 + ln(2*pi)) + mean(log_std)
-            let log_std = agent.model.log_standard_deviation.val();
-            let entropy_val = log_std
+            // Calculate average standard deviation across all joints
+            let log_std = agent.model.log_standard_deviation.val().clamp(-5.0, 2.0);
+            let avg_std = log_std
+                .exp()
                 .mean()
-                .add_scalar(0.5 * (1.0 + (2.0 * PI).ln()))
                 .into_data()
                 .as_slice::<f32>()
                 .unwrap()[0];
@@ -211,8 +209,8 @@ pub fn train<B: AutodiffBackend>(
             let seconds = elapsed % 60;
 
             println!(
-                "[{:02}:{:02}:{:02}] Iter {:4} | Reward: {:7.2} | Fallen: {:6.2}% | Entropy: {:5.3} | SPS: {:8.0}",
-                hours, minutes, seconds, i, avg_episode_reward, fallen_pct, entropy_val, steps_per_second,
+                "[{:02}:{:02}:{:02}] Iter {:4} | Reward: {:7.2} | Fallen: {:6.2}% | StdDev: {:5.3} | SPS: {:8.0}",
+                hours, minutes, seconds, i, avg_episode_reward, fallen_pct, avg_std, steps_per_second,
             );
 
             if i % 10 == 0 {

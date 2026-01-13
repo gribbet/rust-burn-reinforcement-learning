@@ -112,9 +112,9 @@ impl<B: Backend> TrainingEnv<B> {
         let velocity = distance / time_step;
 
         let velocity_reward =
-            (velocity - state.target_velocity.clone()).powf_scalar(2.0).neg().exp();
+            (velocity - state.target_velocity.clone()).powf_scalar(2.0).mul_scalar(-4.0).exp();
 
-        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.002; // Increased efficiency penalty
+        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.1; // Increased efficiency penalty
 
         let reward = velocity_reward + torque_penalty;
 

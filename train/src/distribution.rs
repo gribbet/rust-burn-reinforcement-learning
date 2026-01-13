@@ -35,7 +35,7 @@ impl<B: Backend> DiagonalGaussian<B> {
             .add_scalar((2.0 * PI).ln())
             .add_scalar(1.0)
             .mul_scalar(0.5)
-            .mean_dim(1)
+            .sum_dim(1)
             .squeeze_dim(1)
     }
 }
