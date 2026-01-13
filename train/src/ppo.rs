@@ -186,12 +186,7 @@ pub fn train<B: AutodiffBackend>(
         if i % 10 == 0 || i == iterations - 1 {
             // Calculate average standard deviation across all joints
             let log_std = agent.model.log_standard_deviation.val().clamp(-5.0, 2.0);
-            let avg_std = log_std
-                .exp()
-                .mean()
-                .into_data()
-                .as_slice::<f32>()
-                .unwrap()[0];
+            let avg_std = log_std.exp().mean().into_data().as_slice::<f32>().unwrap()[0];
 
             let total_episodes = rollout.total_episodes;
             let fallen_pct = if total_episodes > 0 {
