@@ -31,6 +31,7 @@ pub struct PhysicsState<B: Backend> {
     pub velocities: Tensor<B, 3>, // [batch, n_particles, 2]
     pub time: Tensor<B, 1>,
     pub target_velocity: Tensor<B, 1>,
+    pub last_action: Tensor<B, 2>, // [batch, action_dim]
 }
 
 pub struct Walker<B: Backend> {
@@ -367,8 +368,9 @@ impl<B: Backend> Walker<B> {
         let velocities = Tensor::zeros([batch_size, self.n_particles, 2], device);
         let time = Tensor::zeros([batch_size], device);
         let target_velocity = Tensor::zeros([batch_size], device);
+        let last_action = Tensor::zeros([batch_size, self.action_dim()], device);
 
-        PhysicsState { positions, velocities, time, target_velocity }
+        PhysicsState { positions, velocities, time, target_velocity, last_action }
     }
 
     pub fn get_observation(&self, state: &PhysicsState<B>) -> Tensor<B, 2> {
@@ -384,7 +386,12 @@ impl<B: Backend> Walker<B> {
         let flat_vel = state.velocities.clone().reshape([batch_size, self.n_particles * 2]);
 
         let obs = Tensor::cat(
-            vec![flat_pos, flat_vel, state.target_velocity.clone().unsqueeze_dim(1)],
+            vec![
+                flat_pos,
+                flat_vel,
+                state.target_velocity.clone().unsqueeze_dim(1),
+                state.last_action.clone(),
+            ],
             1,
         );
         // Sanitize observation: replace NaN with 0.0
@@ -435,7 +442,7 @@ impl<B: Backend> Walker<B> {
             2,
         );
 
-        let torque = action.unsqueeze_dim::<3>(2); // [B, n_joints, 1]
+        let torque = action.clone().unsqueeze_dim::<3>(2); // [B, n_joints, 1]
 
         let f_parent_mag =
             torque.clone() / self.joint_parent_lengths.clone() * self.joint_max_torques.clone();
@@ -579,6 +586,7 @@ impl<B: Backend> Walker<B> {
             velocities,
             time: state.time + self.config.time_step,
             target_velocity: state.target_velocity,
+            last_action: action,
         }
     }
 }

@@ -16,6 +16,7 @@ impl<B: Backend> EnvironmentState<B> for PhysicsState<B> {
             velocities: state.velocities.inner(),
             time: state.time.inner(),
             target_velocity: state.target_velocity.inner(),
+            last_action: state.last_action.inner(),
         }
     }
 
@@ -25,13 +26,16 @@ impl<B: Backend> EnvironmentState<B> for PhysicsState<B> {
             velocities: Tensor::from_inner(state.velocities),
             time: Tensor::from_inner(state.time),
             target_velocity: Tensor::from_inner(state.target_velocity),
+            last_action: Tensor::from_inner(state.last_action),
         }
     }
 
     fn mask_where(self, mask: Tensor<B, 1, Bool>, other: Self) -> Self {
-        let mask_3d = mask.clone().unsqueeze_dim::<2>(1).unsqueeze_dim::<3>(2);
+        let mask_2d = mask.clone().unsqueeze_dim::<2>(1);
+        let mask_3d = mask_2d.clone().unsqueeze_dim::<3>(2);
         let pos_shape = self.positions.shape();
         let vel_shape = self.velocities.shape();
+        let action_shape = self.last_action.shape();
 
         Self {
             positions: self
@@ -39,7 +43,10 @@ impl<B: Backend> EnvironmentState<B> for PhysicsState<B> {
                 .mask_where(mask_3d.clone().expand(pos_shape), other.positions),
             velocities: self.velocities.mask_where(mask_3d.expand(vel_shape), other.velocities),
             time: self.time.mask_where(mask.clone(), other.time),
-            target_velocity: self.target_velocity.mask_where(mask, other.target_velocity),
+            target_velocity: self.target_velocity.mask_where(mask.clone(), other.target_velocity),
+            last_action: self
+                .last_action
+                .mask_where(mask_2d.expand(action_shape), other.last_action),
         }
     }
 }
@@ -105,7 +112,7 @@ impl<B: Backend> TrainingEnv<B> {
         let velocity = distance / time_step;
 
         let velocity_reward =
-            (velocity - state.target_velocity.clone()).powf_scalar(2.0).neg().exp() * time_step;
+            (velocity - state.target_velocity.clone()).powf_scalar(2.0).neg().exp();
 
         let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.002; // Increased efficiency penalty
 
