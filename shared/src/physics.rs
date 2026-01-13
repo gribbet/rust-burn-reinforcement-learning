@@ -383,7 +383,10 @@ impl<B: Backend> Walker<B> {
         let flat_pos = rel_pos.reshape([batch_size, self.n_particles * 2]);
         let flat_vel = state.velocities.clone().reshape([batch_size, self.n_particles * 2]);
 
-        let obs = Tensor::cat(vec![flat_pos, flat_vel], 1);
+        let obs = Tensor::cat(
+            vec![flat_pos, flat_vel, state.target_velocity.clone().unsqueeze_dim(1)],
+            1,
+        );
         // Sanitize observation: replace NaN with 0.0
         let is_finite = obs.clone().equal(obs.clone());
         obs.clone().mask_where(is_finite.bool_not(), Tensor::zeros_like(&obs))

@@ -83,6 +83,7 @@ impl<B: Backend> TrainingEnv<B> {
 
     pub fn step(&self, state: PhysicsState<B>, action: Tensor<B, 2>) -> TrainingStep<B> {
         let action = action.tanh();
+        let WalkerConfig { time_step, fall_y, .. } = self.walker.config;
 
         // Run physics step (internally handles sub-steps)
         let next_state = self.walker.step(state.clone(), action.clone());
@@ -92,7 +93,7 @@ impl<B: Backend> TrainingEnv<B> {
         let root_pos_next =
             next_state.positions.clone().slice([0..batch_size, 0..1, 0..2]).squeeze_dim::<2>(1);
         let root_y = root_pos_next.clone().slice([0..batch_size, 1..2]).squeeze_dim::<1>(1);
-        let is_fallen = root_y.lower_equal_elem(self.walker.config.fall_y);
+        let is_fallen = root_y.lower_equal_elem(fall_y);
 
         let com_next = self.walker.center_of_mass(next_state.positions.clone());
         let com_prev = self.walker.center_of_mass(state.positions.clone());
@@ -101,11 +102,14 @@ impl<B: Backend> TrainingEnv<B> {
         let com_x_prev = com_prev.clone().slice([0..batch_size, 0..1]).squeeze_dim::<1>(1);
 
         let distance = com_x_next.clone() - com_x_prev;
-        let progress = distance * 1.0;
+        let velocity = distance / time_step;
+
+        let velocity_reward =
+            (velocity - state.target_velocity.clone()).powf_scalar(2.0).neg().exp() * time_step;
 
         let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.002; // Increased efficiency penalty
 
-        let reward = progress + torque_penalty;
+        let reward = velocity_reward + torque_penalty;
 
         // Sanitize reward: replace NaN with 0.0
         let is_finite = reward.clone().equal(reward.clone());
