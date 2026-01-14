@@ -43,9 +43,9 @@ async fn main() {
         clear_background(WHITE);
 
         let target_v = if is_key_down(KeyCode::Right) {
-            1.5
+            2.0
         } else if is_key_down(KeyCode::Left) {
-            -0.5
+            -1.0
         } else {
             0.0
         };

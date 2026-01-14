@@ -83,7 +83,7 @@ impl<B: Backend> TrainingEnv<B> {
         let mut state = self.walker.initial_state(environments_count, device);
 
         state.target_velocity =
-            Tensor::random([environments_count], Distribution::Uniform(-0.5, 1.5), device);
+            Tensor::random([environments_count], Distribution::Uniform(-1.0, 2.0), device);
 
         (self.walker.get_observation(&state), state)
     }
@@ -114,7 +114,7 @@ impl<B: Backend> TrainingEnv<B> {
         let velocity_reward =
             (velocity - state.target_velocity.clone()).powf_scalar(2.0).mul_scalar(-4.0).exp();
 
-        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -0.1; // Increased efficiency penalty
+        let torque_penalty = action.powf_scalar(2.0).sum_dim(1).squeeze_dim::<1>(1) * -1.0;
 
         let reward = velocity_reward + torque_penalty;
 

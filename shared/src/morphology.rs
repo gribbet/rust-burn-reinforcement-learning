@@ -32,23 +32,23 @@ impl Morphology {
                         max_torque: 150.0,
                         child: Segment {
                             length: 0.6,
-                            mass: 35.0,
+                            mass: 25.0,
                             joints: vec![
                                 // Left Leg
                                 Joint {
-                                    angle_min: -0.25, // Swing back
-                                    angle_max: 1.0,   // Swing forward
-                                    max_torque: 120.0,
+                                    angle_min: -0.8, // Swing back
+                                    angle_max: 1.2,  // Swing forward
+                                    max_torque: 180.0,
                                     child: Segment {
                                         length: 0.4,
-                                        mass: 10.0,
+                                        mass: 12.0,
                                         joints: vec![Joint {
-                                            angle_min: -1.8, // Knee bend
+                                            angle_min: -2.0, // Knee bend
                                             angle_max: 0.0,  // Straight
-                                            max_torque: 80.0,
+                                            max_torque: 120.0,
                                             child: Segment {
                                                 length: 0.4,
-                                                mass: 3.5,
+                                                mass: 5.0,
                                                 joints: vec![],
                                             },
                                         }],
@@ -56,19 +56,19 @@ impl Morphology {
                                 },
                                 // Right Leg
                                 Joint {
-                                    angle_min: -0.25,
-                                    angle_max: 1.0,
-                                    max_torque: 120.0,
+                                    angle_min: -0.8,
+                                    angle_max: 1.2,
+                                    max_torque: 180.0,
                                     child: Segment {
                                         length: 0.4,
-                                        mass: 10.0,
+                                        mass: 12.0,
                                         joints: vec![Joint {
-                                            angle_min: -1.8,
+                                            angle_min: -2.0,
                                             angle_max: 0.0,
-                                            max_torque: 80.0,
+                                            max_torque: 120.0,
                                             child: Segment {
                                                 length: 0.4,
-                                                mass: 3.5,
+                                                mass: 5.0,
                                                 joints: vec![],
                                             },
                                         }],
