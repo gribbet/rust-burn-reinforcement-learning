@@ -248,9 +248,9 @@ fn compute_proximal_policy_optimization_loss<B: AutodiffBackend>(
     let (mean, log_std, values) = agent.model.forward(observation);
     let values = values.squeeze_dim::<1>(1);
 
-    let distribution = DiagonalGaussian::new(mean, log_std.clamp(-5.0, 2.0));
+    let distribution = DiagonalGaussian::new(mean.clone(), log_std.clamp(-5.0, 2.0));
     let log_probabilities = distribution.log_probability(actions);
-    let entropy = distribution.entropy();
+    let entropy = distribution.entropy().mean();
 
     let ratio = (log_probabilities - old_log_probabilities).exp().clamp(0.0, 10.0);
     let surrogate_1 = ratio.clone() * advantages.clone();

@@ -42,13 +42,21 @@ async fn main() {
     loop {
         clear_background(WHITE);
 
-        state.target_velocity = Tensor::from_floats([1.0], &device);
+        let target_v = if is_key_down(KeyCode::Right) {
+            1.5
+        } else if is_key_down(KeyCode::Left) {
+            -0.5
+        } else {
+            0.0
+        };
+
+        state.target_velocity = Tensor::from_floats([target_v], &device);
 
         let action = if agent_loaded {
             let obs = walker.get_observation(&state);
             let normalized_obs = agent.normalizer.normalize(obs);
             let (mean, _, _) = agent.model.forward(normalized_obs);
-            mean.tanh()
+            mean
         } else {
             // Zero action to verify physics stability
             Tensor::zeros([1, action_dim], &device)
@@ -105,9 +113,11 @@ fn draw_simulation<B: Backend>(state: &PhysicsState<B>, walker: &Walker<B>) {
 
     // Draw Info
     let (root_x, root_y) = get_pos(0);
+    let target_v = state.target_velocity.clone().to_data().as_slice::<f32>().unwrap()[0];
     draw_text(&format!("X: {:.2}", root_x), 20.0, 20.0, 20.0, BLACK);
     draw_text(&format!("Time: {:.2}s", time), 20.0, 40.0, 20.0, BLACK);
+    draw_text(&format!("Target V: {:.1}", target_v), 20.0, 60.0, 20.0, BLACK);
     if root_y < walker.config.fall_y {
-        draw_text("FALLEN", 20.0, 70.0, 30.0, RED);
+        draw_text("FALLEN", 20.0, 90.0, 30.0, RED);
     }
 }

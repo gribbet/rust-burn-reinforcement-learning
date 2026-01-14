@@ -27,7 +27,7 @@ impl<B: Backend> ActorCritic<B> {
     }
 
     pub fn forward(&self, x: Tensor<B, 2>) -> (Tensor<B, 2>, Tensor<B, 1>, Tensor<B, 2>) {
-        let mean = self.actor.forward(x.clone());
+        let mean = self.actor.forward(x.clone()).tanh();
         let value = self.critic.forward(x);
         (mean, self.log_standard_deviation.val(), value)
     }
